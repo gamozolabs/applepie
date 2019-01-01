@@ -24386,9 +24386,9 @@ if test "$NO_LT" != 1; then
 fi
 EXE=""
 COMMAND_SEPARATOR="&& \\"
-CD_UP_ONE="echo done"
-CD_UP_TWO="echo done"
-CD_UP_THREE="echo done"
+CD_UP_ONE=""
+CD_UP_TWO=""
+CD_UP_THREE=""
 
 INSTALL_TARGET=install_unix
 INSTALL_LIST_FOR_PLATFORM=
