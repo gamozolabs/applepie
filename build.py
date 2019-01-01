@@ -1,0 +1,43 @@
+import os, subprocess, shutil, threading, time
+
+print("Checking for cl.exe... ", end='', flush=True)
+assert b"Microsoft (R) C/C++ Optimizing Compiler" in subprocess.check_output(["cl.exe", "/?"], stderr=subprocess.STDOUT)
+print("ok")
+
+print("Checking that cl.exe is for x64... ", end='', flush=True)
+assert b"for x64" in subprocess.check_output(["cl.exe", "/?"], stderr=subprocess.STDOUT)
+print("ok")
+
+print("Checking for cygwin... ", end='', flush=True)
+assert os.path.exists("C:\\cygwin64\\cygwin.bat")
+print("ok")
+
+# Go into bochs build directory
+if not os.path.exists("bochs_build"):
+    os.mkdir("bochs_build")
+os.chdir("bochs_build")
+
+# Set up path to include cygwin
+os.environ["PATH"] += os.pathsep + "C:\\cygwin64\\bin"
+
+# Set the compiler and linker to MSVC. Without this the ./configure script will
+# potentially use GCC which would result in things like "unsigned long" being
+# reported as 8 bytes instead of the 4 bytes they are on Windows
+os.environ["CC"] = "cl.exe"
+os.environ["CXX"] = "cl.exe"
+os.environ["LD"] = "link.exe"
+
+# If we have not configured bochs before, or if the configure script is newer
+# than the last configure, reconfigure
+if not os.path.exists("bochs_configured") or os.path.getmtime("bochs_configured") < os.path.getmtime("../bochs_config"):
+    # Configure bochs
+    os.system("bash.exe ../bochs_config")
+
+    # Create a marker indicating that bochs is configured
+    with open("bochs_configured", "wb") as fd:
+        fd.write(b"WOO")
+else:
+    print("Skipping configuration as it's already up to date!")
+
+# Build bochs
+os.system("C:\\cygwin64\\bin\\bash.exe -c \"time make -s -j16\"")

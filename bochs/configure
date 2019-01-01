@@ -25044,9 +25044,9 @@ case "$target" in
     CXXFP="/Tp"
     CFP="/Tc"
     OFP="/Fo"
-    MAKE=nmake
+    MAKE=make
     MAKELIB="lib /nologo /subsystem:console,\"5.01\" /verbose /out:\$@"
-    RMCOMMAND="-del"
+    #RMCOMMAND="-del"
     #L_OPT="/debug"    # for debugging
     L_OPT=""           # no debug info
     LINK="link $L_OPT /nologo /subsystem:console,\"5.01\" /incremental:no /out:\$@ "
@@ -25060,10 +25060,10 @@ case "$target" in
       BXHUB_FLAG="/DBXHUB"
       BXHUB_LINK_OPTS="ws2_32.lib"
     fi
-    COMMAND_SEPARATOR=""
-    CD_UP_ONE="cd .."
-    CD_UP_TWO="cd ..\.."
-    CD_UP_THREE="cd ..\..\.."
+    #COMMAND_SEPARATOR=""
+    #CD_UP_ONE="cd .."
+    #CD_UP_TWO="cd ..\.."
+    #CD_UP_THREE="cd ..\..\.."
     have_gettimeofday=0  # even though it may exist in build environment
     $as_echo "#define BX_64BIT_CONSTANTS_USE_LL 0" >>confdefs.h
 

@@ -1,0 +1,27 @@
+#!/bin/sh
+
+set echo
+
+../bochs/configure --target=x86_64-pc-windows \
+            --enable-sb16 \
+            --enable-ne2000 \
+            --enable-all-optimizations \
+            --enable-cpu-level=6 \
+            --enable-x86-64 \
+            --enable-vmx=2 \
+            --enable-pci \
+            --enable-clgd54xx \
+            --enable-voodoo \
+            --enable-usb \
+            --enable-usb-ohci \
+            --enable-usb-ehci \
+            --enable-usb-xhci \
+            --enable-busmouse \
+            --enable-es1370 \
+            --enable-e1000 \
+            --enable-show-ips \
+            --disable-readline \
+            --without-x \
+            --with-win32 --with-rfb --with-nogui
+
+unset echo
