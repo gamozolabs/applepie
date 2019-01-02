@@ -5,6 +5,7 @@ pub mod whvp;
 pub mod time;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use whvp_bindings::winhvplatform::*;
@@ -87,6 +88,57 @@ fn kicker(handle: usize) {
     }
 }
 
+#[derive(Clone, Copy, Hash, PartialEq, Eq, Debug)]
+enum VmExitReason {
+    None,
+    MemoryAccess,
+    IoPortAccess,
+    UnrecoverableException,
+    InvalidVpRegisterValue,
+    UnsupportedFeature,
+    InterruptWindow,
+    Halt,
+    ApicEoi,
+    MsrAccess,
+    Cpuid,
+    Exception,
+    Canceled,
+}
+
+impl VmExitReason {
+    fn from_whvp(whvp_reason: WHV_RUN_VP_EXIT_REASON) -> Self {
+        match whvp_reason {
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonNone =>
+                VmExitReason::None,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess =>
+                VmExitReason::MemoryAccess,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess =>
+                VmExitReason::IoPortAccess,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnrecoverableException =>
+                VmExitReason::UnrecoverableException,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonInvalidVpRegisterValue =>
+                VmExitReason::InvalidVpRegisterValue,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnsupportedFeature =>
+                VmExitReason::UnsupportedFeature,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow =>
+                VmExitReason::InterruptWindow,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt =>
+                VmExitReason::Halt,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64ApicEoi =>
+                VmExitReason::ApicEoi,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess =>
+                VmExitReason::MsrAccess,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid =>
+                VmExitReason::Cpuid,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException =>
+                VmExitReason::Exception,
+            WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled =>
+                VmExitReason::Canceled,
+            _ => panic!("Invalid vm exit reason {}\n", whvp_reason),
+        }
+    }
+}
+
 // Due to bochs using longjmps we must place a lot of state in this structure
 // so we don't lose it when our code suddenly gets hijacked and reenters from
 // the start
@@ -110,6 +162,9 @@ struct PersistState {
 
     /// Last TSC value when Bochs device state was synced with the wall clock
     last_sync_cycles: u64,
+
+    /// VM exit reason frequencies
+    vmexits: HashMap<VmExitReason, u64>,
 }
 
 thread_local! {
@@ -342,6 +397,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     persist.vm_elapsed as f64 / total_cycles as f64,
                     total_cycles as f64 / persist.tickrate.unwrap());
 
+                // Print vmexit reason frequencies
+                print!("{:#?}\n", persist.vmexits);
+
                 // Update the next report time
                 persist.future_report = time::rdtsc() +
                     persist.tickrate.unwrap() as u64;
@@ -382,6 +440,17 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Sync hypervisor register state to Bochs register state
             context = persist.hypervisor.as_mut().unwrap().get_context();
             (routines.set_context)(&context);
+
+            // Record the exit reason frequencies
+            let vmer = VmExitReason::from_whvp(vmexit.ExitReason);
+
+            // Insert the reason if it's not already tracked
+            if !persist.vmexits.contains_key(&vmer) {
+                persist.vmexits.insert(vmer, 0);
+            }
+
+            // Update frequency
+            *persist.vmexits.get_mut(&vmer).unwrap() += 1;   
 
             // Determine the reason the hypervisor exited
             match vmexit.ExitReason {
