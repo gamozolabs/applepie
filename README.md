@@ -22,6 +22,12 @@ Currently it just boots things. However it will very quickly become a computer s
 
 It hops between hypervisor and Bochs emulation thousands of times a second with no issues. This means you could do some conditional instrumentation (like "run this DLL in emulation mode") which would allow perfect coverage gathering, memory coverage, taint tracking, etc. This dynamic swiching ability is one of the core features right now.
 
+# Development cycle
+
+Given I've written almost all the features here before (coverage, fuzzing, fast resets, etc). I expect this project should pretty quickly become ready for fuzzing, unless I get distracted :D
+
+I'm aiming for end-of-January for coverage, feedback, module listings, process lists, and symbol support. Which would make it a very capable fuzzer.
+
 # OS Support
 
 Currently I've tested both installing and booting Windows 7 Pro inside of Bochs. I've also gotten things like FreeBSD and Linux to boot via Live CDs. I haven't tried much but it _should_ support nearly anything Bochs does.
