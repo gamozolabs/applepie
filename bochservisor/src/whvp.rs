@@ -1,15 +1,26 @@
+/// This file is used to hide some of the internal WHVP workings from Rust and
+/// provide a more Rust-like interface
+/// 
+/// There isn't much anything special here, just a lot of FFI
+
 use std::ffi::c_void;
 use crate::time;
 use whvp_bindings::winhvplatform::*;
 
+// Force a dependency on winhvplatform.lib to make sure we link against it
 #[link(name = "winhvplatform")] extern {}
 
-pub const PERM_NONE: i32    = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagNone;
-pub const PERM_READ: i32    = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagRead;
-pub const PERM_WRITE: i32   = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagWrite;
+// Memory permissions
+pub const PERM_NONE:    i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagNone;
+pub const PERM_READ:    i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagRead;
+pub const PERM_WRITE:   i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagWrite;
 pub const PERM_EXECUTE: i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagExecute;
-pub const PERM_DIRTY: i32   = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagTrackDirtyPages;
+pub const PERM_DIRTY:   i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagTrackDirtyPages;
 
+/// Entire context name list for a processor using all possible fields WHVP
+/// allows access to
+/// 
+/// DO NOT CHANGE WITHOUT CHANGING THE C VERSION IN BOCHS!!!
 const WHVP_CONTEXT_NAMES: &[i32] = &[
     WHV_REGISTER_NAME_WHvX64RegisterRax,
     WHV_REGISTER_NAME_WHvX64RegisterRcx,
@@ -220,12 +231,14 @@ impl WhvpContext {
 }
 
 impl Default for WhvpContext {
+    /// Returns a zeroed out context structure
     fn default() -> Self {
         unsafe { std::mem::zeroed() }
     }
 }
 
 impl std::fmt::Display for WhvpContext {
+    /// Pretty prints the entire WHVP state available
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         unsafe {
             write!(f,
@@ -297,17 +310,26 @@ impl std::fmt::Display for WhvpContext {
                 self.cs.Segment.Selector, self.rip.Reg64,
                 self.rip.Reg64.wrapping_add(self.cs.Segment.Base),
                 self.rflags.Reg64,
-                self.es.Segment.Selector, self.es.Segment.Base, self.es.Segment.Limit, self.es.Segment.__bindgen_anon_1.Attributes,
-                self.cs.Segment.Selector, self.cs.Segment.Base, self.cs.Segment.Limit, self.cs.Segment.__bindgen_anon_1.Attributes,
-                self.ss.Segment.Selector, self.ss.Segment.Base, self.ss.Segment.Limit, self.ss.Segment.__bindgen_anon_1.Attributes,
-                self.ds.Segment.Selector, self.ds.Segment.Base, self.ds.Segment.Limit, self.ds.Segment.__bindgen_anon_1.Attributes,
-                self.fs.Segment.Selector, self.fs.Segment.Base, self.fs.Segment.Limit, self.fs.Segment.__bindgen_anon_1.Attributes,
-                self.gs.Segment.Selector, self.gs.Segment.Base, self.gs.Segment.Limit, self.gs.Segment.__bindgen_anon_1.Attributes,
-                self.ldtr.Segment.Base, self.ldtr.Segment.Limit, self.ldtr.Segment.__bindgen_anon_1.Attributes,
-                self.tr.Segment.Base, self.tr.Segment.Limit, self.tr.Segment.__bindgen_anon_1.Attributes,
+                self.es.Segment.Selector, self.es.Segment.Base,
+                self.es.Segment.Limit, self.es.Segment.__bindgen_anon_1.Attributes,
+                self.cs.Segment.Selector, self.cs.Segment.Base,
+                self.cs.Segment.Limit, self.cs.Segment.__bindgen_anon_1.Attributes,
+                self.ss.Segment.Selector, self.ss.Segment.Base,
+                self.ss.Segment.Limit, self.ss.Segment.__bindgen_anon_1.Attributes,
+                self.ds.Segment.Selector, self.ds.Segment.Base,
+                self.ds.Segment.Limit, self.ds.Segment.__bindgen_anon_1.Attributes,
+                self.fs.Segment.Selector, self.fs.Segment.Base,
+                self.fs.Segment.Limit, self.fs.Segment.__bindgen_anon_1.Attributes,
+                self.gs.Segment.Selector, self.gs.Segment.Base,
+                self.gs.Segment.Limit, self.gs.Segment.__bindgen_anon_1.Attributes,
+                self.ldtr.Segment.Base, self.ldtr.Segment.Limit,
+                self.ldtr.Segment.__bindgen_anon_1.Attributes,
+                self.tr.Segment.Base, self.tr.Segment.Limit,
+                self.tr.Segment.__bindgen_anon_1.Attributes,
                 self.idtr.Table.Base, self.idtr.Table.Limit,
                 self.gdtr.Table.Base, self.gdtr.Table.Limit,
-                self.tsc.Reg64, self.tsc_aux.Reg64, self.efer.Reg64, self.kernel_gs_base.Reg64,
+                self.tsc.Reg64, self.tsc_aux.Reg64, self.efer.Reg64,
+                self.kernel_gs_base.Reg64,
                 self.apic_base.Reg64, self.pat.Reg64,
                 self.sysenter_cs.Reg64, self.sysenter_eip.Reg64,
                 self.sysenter_esp.Reg64,
@@ -382,25 +404,12 @@ impl std::fmt::Display for WhvpContext {
                 self.st7.Fp.__bindgen_anon_1.Mantissa,
                 self.st7.Fp.__bindgen_anon_1.BiasedExponent(),
                 self.st7.Fp.__bindgen_anon_1.Sign(),
-                /*
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.InterruptionPending(),
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.InterruptionType(),
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.DeliverErrorCode(),
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.InstructionLength(),
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.NestedEvent(),
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.InterruptionVector(),
-                self.pending_interruption.PendingInterruption.__bindgen_anon_1.ErrorCode,
-                self.interrupt_state.InterruptState.__bindgen_anon_1.InterruptShadow(),
-                self.interrupt_state.InterruptState.__bindgen_anon_1.NmiMasked(),
-                self.pending_event.Reg32,
-                self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.NmiNotification(),
-                self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.InterruptNotification(),
-                self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.InterruptPriority(),*/
             )
         }
     }
 }
 
+/// Structure representing an instance of a hypervisor using the WHVP API
 pub struct Whvp {
     /// The raw partition used to manage the partition with the WHVP API
     partition: WHV_PARTITION_HANDLE,
@@ -412,14 +421,10 @@ pub struct Whvp {
     vm_run_overhead: u64,
 }
 
-impl Default for Whvp {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Whvp {
+    /// Create a new WHVP instance with one processor
     pub fn new() -> Self {
+        // Create a new WHVP partition
         let mut partition: WHV_PARTITION_HANDLE = std::ptr::null_mut();
         let res = unsafe { WHvCreatePartition(&mut partition) };
         assert!(res == 0, "WHvCreatePartition() error: {:#x}", res);
@@ -432,6 +437,7 @@ impl Whvp {
             vm_run_overhead: !0,
         };
 
+        // Register that we only want one processor
         let proc_count = 1u32;
         let res = unsafe { WHvSetPartitionProperty(partition,
             WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeProcessorCount,
@@ -440,41 +446,25 @@ impl Whvp {
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 
-        /*
-        let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
-        unsafe {
-            vmexits.__bindgen_anon_1.set_ExceptionExit(1);
-        }
-        let res = unsafe { WHvSetPartitionProperty(partition,
-            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExtendedVmExits,
-            &vmexits as *const WHV_EXTENDED_VM_EXITS as *const c_void,
-            std::mem::size_of_val(&vmexits) as u32)
-        };
-        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
-
-        let eeb: u64 = 3;
-        let res = unsafe { WHvSetPartitionProperty(partition,
-            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExceptionExitBitmap,
-            &eeb as *const u64 as *const c_void,
-            std::mem::size_of_val(&eeb) as u32)
-        };
-        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);*/
-
+        // Setup the partition, not sure what this does but it's just how the
+        // API works
         let res = unsafe { WHvSetupPartition(partition) };
         assert!(res == 0, "WHvSetupPartition() error: {:#x}", res);
 
+        // Create a single virtual processor
         let res = unsafe { WHvCreateVirtualProcessor(partition, 0, 0) };
         assert!(res == 0, "WHvCreateVirtualProcessor() error: {:#x}", res);
         ret.virtual_processors.push(0);
 
+        // Time the approximate overhead of running a VM. We use this to get
+        // a more accurate estimate of how many cycles actually executed inside
+        // the hypervisor rather than just the API and context switches.
         for _ in 0..10000 {
             let start = time::rdtsc();
             ret.run();
             let elapsed = time::rdtsc() - start;
             ret.vm_run_overhead = std::cmp::min(ret.vm_run_overhead, elapsed);
         }
-
-        print!("Computed VM run overhead to {} cycles\n", ret.vm_run_overhead);
 
         ret
     }
@@ -484,21 +474,32 @@ impl Whvp {
         self.partition
     }
 
-    /// Gets the number of cycles of overhead for a VM entry
+    /// Gets the number of cycles of overhead for a VM entry.
+    /// 
+    /// This can be used to more accurately estimate the amount of cycles spent
+    /// in the hypervisor when subtracted from a cycle count of time spent in
+    /// a `vm.run()`
     pub fn overhead(&self) -> u64 {
         self.vm_run_overhead
     }
 
+    /// Request that the hypervisor exits as soon as it's back in an
+    /// interruptable state. This allows us to get the guest into a state where
+    /// we can deliver things like timer interrupts.
     pub fn register_interrupt_window(&mut self) {
+        // List of names, in this case just the
+        // RegisterDeliverabilityNotifications will be changed.
         const REGINT_NAMES: &[i32] = &[
             WHV_REGISTER_NAME_WHvX64RegisterDeliverabilityNotifications
         ];
 
         unsafe {
+            // Set that we want an interrupt notification
             let mut reg_value: WHV_REGISTER_VALUE = std::mem::zeroed();
             reg_value.DeliverabilityNotifications
                 .__bindgen_anon_1.set_InterruptNotification(1);
 
+            // Call the API to apply the changes
             let res = WHvSetVirtualProcessorRegisters(self.partition, 0,
                 REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
                 &reg_value as *const WHV_REGISTER_VALUE);
@@ -507,7 +508,12 @@ impl Whvp {
         }
     }
 
+    /// Map a new region of memory at physical address `addr` backed by the
+    /// memory pointed to by `backing` for the size of `backing.len()` using
+    /// `perm`. `perm` is a bitwise or-ed combination `PERM_READ`,
+    /// `PERM_WRITE`, and `PERM_EXECUTE`.
     pub fn map_memory(&mut self, addr: usize, backing: &mut [u8], perm: i32) {
+        // Make sure everything looks sane about this new mapping
         assert!(addr & 0xfff == 0,
             "Cannot map page-unaligned memory");
         assert!((backing.as_ptr() as usize) & 0xfff == 0,
@@ -516,12 +522,14 @@ impl Whvp {
             "Cannot map page-unaligned memory (unaligned size)");
         assert!(backing.len() > 0, "Cannot map zero bytes");
 
+        // Map the memory in!
         let res = unsafe { WHvMapGpaRange(self.partition,
             backing.as_mut_ptr() as *mut c_void, addr as u64,
             backing.len() as u64, perm) };
         assert!(res == 0, "WHvMapGpaRange() error: {:#x}", res);
     }
 
+    // Run the hypervisor until exit, returning the exit context
     pub fn run(&mut self) -> WHV_RUN_VP_EXIT_CONTEXT {
         let mut context: WHV_RUN_VP_EXIT_CONTEXT =
             unsafe { std::mem::zeroed() };
@@ -532,8 +540,12 @@ impl Whvp {
         context
     }
 
+    // Get the entire WHVP context structure from the hypervisor
     pub fn get_context(&self) -> WhvpContext {
+        // Make room for the context
         let mut ret: WhvpContext = unsafe { std::mem::zeroed() };
+
+        // Get the state
         let res = unsafe { WHvGetVirtualProcessorRegisters(self.partition, 0,
             WHVP_CONTEXT_NAMES.as_ptr(), WHVP_CONTEXT_NAMES.len() as u32,
             &mut ret as *mut WhvpContext as *mut WHV_REGISTER_VALUE) };
@@ -541,7 +553,9 @@ impl Whvp {
         ret
     }
 
+    // Commit the entire WHVP context structure state to the hypervisor state
     pub fn set_context(&mut self, context: &WhvpContext) {
+        // Apply the state
         let res = unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0,
             WHVP_CONTEXT_NAMES.as_ptr(), WHVP_CONTEXT_NAMES.len() as u32,
             context as *const WhvpContext as *const WHV_REGISTER_VALUE) };
@@ -552,12 +566,15 @@ impl Whvp {
 }
 
 impl Drop for Whvp {
+    /// Drop everything related to the WHVP API we registered
     fn drop(&mut self) {
+        // Delete all virtual processors
         for &pid in &self.virtual_processors {
             let res = unsafe { WHvDeleteVirtualProcessor(self.partition, pid) };
             assert!(res == 0, "WHvDeleteVirtualProcessor() error: {:#x}", res);
         }
 
+        // Delete the partition itself
         let res = unsafe { WHvDeletePartition(self.partition) };
         assert!(res == 0, "WHvDeletePartition() error: {:#x}", res);
     }

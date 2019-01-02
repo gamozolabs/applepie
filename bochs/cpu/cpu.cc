@@ -29,6 +29,8 @@
 
 #include <WinHvPlatform.h>
 
+// Big context stucture. This must stay in sync with the Rust version as this
+// is passed between FFI boundaries
 __declspec(align(64))
 struct _whvp_context {
   WHV_REGISTER_VALUE rax;
@@ -132,6 +134,8 @@ struct _whvp_context {
   //WHV_REGISTER_VALUE internal_activity_state;
 };
 
+// Function pointers passed to the Rust DLL for accessing things they need in
+// the Bochs environment
 struct _bochs_routines {
   void  (*set_context)(const struct _whvp_context*);
   void  (*get_context)(struct _whvp_context*);
@@ -140,6 +144,7 @@ struct _bochs_routines {
   void* (*get_memory_backing)(Bit64u address, int type);
 };
 
+// Set helper for bochs segments
 #define SET_SEGMENT_FULL(name, bochs_seg) \
   BX_CPU_THIS_PTR set_segment_ar_data(&bochs_seg,\
     context->name.Segment.Present,\
@@ -148,15 +153,20 @@ struct _bochs_routines {
     context->name.Segment.Limit,\
     context->name.Segment.Attributes);
 
+// Set helper for floating pointer registers
 #define SET_FP_REG(name, bochs_idx) \
   BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].fraction  = context->name.Fp.Mantissa;\
   BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp       = context->name.Fp.BiasedExponent;\
   BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp      |= (context->name.Fp.Sign << 15);
 
+// get_memory_backing implementation for Rust which allows Rust to get access to
+// memory backings for certain physical addresses
 void* get_memory_backing(Bit64u address, int type) {
   return (void*)BX_CPU_THIS_PTR getHostMemAddr(address, type);
 }
 
+// set_context implementation that allows Rust to provide a new CPU context for
+// Bochs to use internally
 void set_context(const struct _whvp_context* context) {
   RAX = context->rax.Reg64;
   RCX = context->rcx.Reg64;
@@ -272,6 +282,10 @@ void set_context(const struct _whvp_context* context) {
   BX_CPU_THIS_PTR msr.fmask = context->sfmask.Reg32;
   BX_CPU_THIS_PTR msr.tsc_aux = context->tsc_aux.Reg32;
 
+  // The next few lines are taken from the mov cr0 implementation and attempt
+  // to make sure Bochs updates internal state depending on if mode changes
+  // occured from the newly commit register state
+
 #if BX_CPU_LEVEL >= 4
   BX_CPU_THIS_PTR handleAlignmentCheck(/* CR0.AC reloaded */);
 #endif
@@ -286,17 +300,21 @@ void set_context(const struct _whvp_context* context) {
 #endif
 }
 
+// Segment getter helper
 #define GET_SEGMENT_FULL(name, bochs_seg) \
   context->name.Segment.Base       = bochs_seg.cache.u.segment.base;\
   context->name.Segment.Limit      = bochs_seg.cache.u.segment.limit_scaled;\
   context->name.Segment.Selector   = bochs_seg.selector.value;\
   context->name.Segment.Attributes = (BX_CPU_THIS_PTR get_descriptor_h(&bochs_seg.cache) >> 8) & 0xffff;
 
+// Floating point register value getter
 #define GET_FP_REG(name, bochs_idx) \
   context->name.Fp.Mantissa       = BX_READ_FPU_REG(bochs_idx).fraction;\
   context->name.Fp.BiasedExponent = BX_READ_FPU_REG(bochs_idx).exp & 0x7fff;\
   context->name.Fp.Sign           = (BX_READ_FPU_REG(bochs_idx).exp >> 15) & 1;
 
+// get_context implementation to allow Rust to get access to all of the CPU
+// state internal to Bochs
 void get_context(struct _whvp_context* context) {
   context->rax.Reg64 = RAX;
   context->rcx.Reg64 = RCX;
@@ -413,10 +431,18 @@ void get_context(struct _whvp_context* context) {
   context->tsc_aux.Reg64 = BX_CPU_THIS_PTR msr.tsc_aux;
 }
 
+// step_cpu() implementation which allows Rust to run a certain amount of
+// instructions (or chains with optimizations on).
+//
+// This code is nearly directly copied and pasted from the actual Bochs CPU
+// loop
 void step_cpu(Bit64u steps) {
+  // Flush data TLBs, this might not be needed but we do it anyways
   BX_CPU_THIS_PTR TLB_flush();
 
+  // Step while we have steps... duh
   while(steps) {
+    // Completed a step
     steps--;
     
     // check on events which occurred for previous instructions (traps)
@@ -484,11 +510,16 @@ void step_cpu(Bit64u steps) {
     BX_CPU_THIS_PTR async_event &= ~BX_ASYNC_EVENT_STOP_TRACE;
   }
 
+  // Flush TLBs again, once again, might not be needed
   BX_CPU_THIS_PTR TLB_flush();
 }
 
+// step_device() implementation. This steps the device and time emulation in
+// Bochs. This is used very frequently to make sure things like timer interrupts
+// are delivered to the guest.
 void step_device(Bit64u steps) {
   while(steps) {
+    // Check for async events and handle them if there are any
     if (BX_CPU_THIS_PTR async_event) {
       if (BX_CPU_THIS_PTR handleAsyncEvent()) {
         // If request to return to caller ASAP.
@@ -496,13 +527,26 @@ void step_device(Bit64u steps) {
       }
     }
 
+    // We actually tick one at a time even though we could tick in bulk. This
+    // allows us to check for async events more frequently and it makes for a
+    // lower latency hypervisor experience. This could be tweaked higher for
+    // more performance, at the cost of usability.
+    //
+    // Tuning this further might cause interrupts to get queued up without being
+    // handled so it could actually potentially cause corruption in the guest.
+    // Be careful changing things like this.
     bx_pc_system.tickn(1);
     steps--;
   }
 }
 
+// State that tracks if we've initialized bochservisor
 int already_booted = 0;
+
+// Routines passed to Rust
 struct _bochs_routines routines = { 0 };
+
+// Cached address of the Rust routine to call instead of the normal CPU loop
 void (*bochs_cpu_loop)(struct _bochs_routines*, Bit64u) = NULL;
 
 void BX_CPU_C::cpu_loop(void)
@@ -539,9 +583,9 @@ void BX_CPU_C::cpu_loop(void)
   BX_CPU_THIS_PTR prev_rip = RIP; // commit new EIP
   BX_CPU_THIS_PTR speculative_rsp = 0;
 
+  // Check if we've run once before (due to returns and longjumps this gets hit
+  // multiple times)
   if(!already_booted) {
-    already_booted = 1;
-
     // Enforce IPS is what we expect
     Bit64u ips = SIM->get_param_num(BXPN_IPS)->get();
     if(ips != 1000000) {
@@ -565,28 +609,35 @@ void BX_CPU_C::cpu_loop(void)
       exit(-1);
     }
 
+    // Load the bochservisor DLL
     HMODULE module = LoadLibrary("..\\bochservisor\\target\\release\\bochservisor.dll");
     if(!module) {
       fprintf(stderr, "LoadLibrary() error : %d\n", GetLastError());
       exit(-1);
     }
 
+    // Configure the routines to hand to Rust for manipulating Bochs
     routines.set_context        = set_context;
     routines.get_context        = get_context;
     routines.step_device        = step_device;
     routines.step_cpu           = step_cpu;
     routines.get_memory_backing = get_memory_backing;
 
-    bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u))GetProcAddress(module, "bochs_cpu_loop");
+    // Lookup the address of the Rust CPU look implementation in the DLL
+    bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u))
+      GetProcAddress(module, "bochs_cpu_loop");
     if(!bochs_cpu_loop) {
       fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
       exit(-1);
     }
-  } else {
-    //printf("Bochs longjmped!\n");
+
+    // Change state to indicate we've run the initializiation tasks
+    already_booted = 1;
   }
 
+  // Jump into the Rust CPU loop implementation
   (*bochs_cpu_loop)(&routines, BX_MEM(0)->get_memory_len());
+  return;
 
   while (1) {
     // check on events which occurred for previous instructions (traps)
