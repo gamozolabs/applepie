@@ -75,6 +75,12 @@ Go into "Turn Windows features on or off" and tick the checkbox next to Hyper-V.
 
 Just run `python build.py` from the root directory of this project. It should check for sanity of the environment and everything should "just work".
 
+## Cleaning
+
+Run `python build.py clean` to clean Bochs and Rust binaries.
+
+Run `python build.py deepclean` to completely remove all Bochs and Rust binaries, it also removes all the configuration for Bochs. Use this if you reconfigure Bochs in some way.
+
 # Usage
 
 Read up on Bochs configuration to figure out how to set up your environment. We have a few requirements, like `sync=none`, `ips=1000000`, and currently single processor support only. These are enforced inside of the code itself to make sure you don't shoot yourself in the foot.
