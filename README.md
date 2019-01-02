@@ -10,6 +10,12 @@ This is a rapidly developing project. I'll probably tweet when new features go o
 
 [@gamozolabs](https://twitter.com/gamozolabs)
 
+# Mascot
+
+I like to have physical things for my projects:
+
+[apple pie squishable](http://www.squishable.com/pc/comfortfood_apple_pie/comfort_food/Comfort+Food+Apple+Pie)
+
 # What is this for?
 
 Currently it just boots things. However it will very quickly become a computer security tool, see the future section for more information.
