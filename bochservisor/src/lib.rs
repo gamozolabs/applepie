@@ -387,16 +387,28 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             match vmexit.ExitReason {
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => {
                     // Emulate MMIO by emulating using Bochs for a bit
+                    // Note this is tunable but 100 seems to by far be the best
+                    // mix between performance and latency. <10 is unusable.
+                    // >1000 introduces latency
+                    // (cursor stutters when moving, etc)
                     emulating = 100;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
                     // Emulate I/O by emulating using Bochs for a bit
+                    // Note this is tunable but 100 seems to by far be the best
+                    // mix between performance and latency. <10 is unusable.
+                    // >1000 introduces latency
+                    // (cursor stutters when moving, etc)
                     emulating = 100;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => {
                     // Emulate halts by emulating using Bochs for a bit
+                    // Note this is tunable but 100 seems to by far be the best
+                    // mix between performance and latency. <10 is unusable.
+                    // >1000 introduces latency
+                    // (cursor stutters when moving, etc)
                     emulating = 100;
                     continue;
                 }
