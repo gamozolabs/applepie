@@ -10,6 +10,10 @@ This is a rapidly developing project. I'll probably tweet when new features go o
 
 [@gamozolabs](https://twitter.com/gamozolabs)
 
+# Hype Video
+
+[![IMAGE ALT TEXT HERE](https://img.youtube.com/vi/AIlHigJsXYw/0.jpg)](https://www.youtube.com/watch?v=AIlHigJsXYw)
+
 # Mascot
 
 I like to have physical things for my projects:
