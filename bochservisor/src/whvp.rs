@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use crate::time;
 use whvp_bindings::winhvplatform::*;
 
 #[link(name = "winhvplatform")] extern {}
@@ -93,10 +94,10 @@ const WHVP_CONTEXT_NAMES: &[i32] = &[
     //WHV_REGISTER_NAME_WHvX64RegisterPredCmd,
     //WHV_REGISTER_NAME_WHvX64RegisterApicId,
     //WHV_REGISTER_NAME_WHvX64RegisterApicVersion,
-    WHV_REGISTER_NAME_WHvRegisterPendingInterruption,
-    WHV_REGISTER_NAME_WHvRegisterInterruptState,
-    WHV_REGISTER_NAME_WHvRegisterPendingEvent,
-    WHV_REGISTER_NAME_WHvX64RegisterDeliverabilityNotifications,
+    //WHV_REGISTER_NAME_WHvRegisterPendingInterruption,
+    //WHV_REGISTER_NAME_WHvRegisterInterruptState,
+    //WHV_REGISTER_NAME_WHvRegisterPendingEvent,
+    //WHV_REGISTER_NAME_WHvX64RegisterDeliverabilityNotifications,
     //WHV_REGISTER_NAME_WHvRegisterInternalActivityState,
 ];
 
@@ -105,6 +106,9 @@ const WHVP_CONTEXT_NAMES: &[i32] = &[
 /// 
 /// It seems internally there's some alignment requirements.
 /// We force this by using a 64-byte alignment
+/// 
+/// DO NOT CHANGE WITHOUT CHANGING THE C VERSION IN BOCHS!!!
+/// This structure crosses FFI boundaries!
 #[repr(C, align(64))]
 pub struct WhvpContext {
     pub rax: WHV_REGISTER_VALUE,
@@ -201,11 +205,24 @@ pub struct WhvpContext {
     //pub pred_cmd: WHV_REGISTER_VALUE, not yet supported by Windows 17763
     //pub apic_id: WHV_REGISTER_VALUE, not yet supported by Windows 17763
     //pub apic_version: WHV_REGISTER_VALUE, not yet supported by Windows 17763
-    pub pending_interruption: WHV_REGISTER_VALUE,
-    pub interrupt_state: WHV_REGISTER_VALUE,
-    pub pending_event: WHV_REGISTER_VALUE,
-    pub deliverability_notifications: WHV_REGISTER_VALUE,
+    //pub pending_interruption: WHV_REGISTER_VALUE,
+    //pub interrupt_state: WHV_REGISTER_VALUE,
+    //pub pending_event: WHV_REGISTER_VALUE,
+    //pub deliverability_notifications: WHV_REGISTER_VALUE,
     //pub internal_activity_state: WHV_REGISTER_VALUE, unknown type
+}
+
+impl WhvpContext {
+    /// Gets the linear address for RIP
+    pub fn rip(&self) -> u64 {
+        unsafe { self.cs.Segment.Base.wrapping_add(self.rip.Reg64) }
+    }
+}
+
+impl Default for WhvpContext {
+    fn default() -> Self {
+        unsafe { std::mem::zeroed() }
+    }
 }
 
 impl std::fmt::Display for WhvpContext {
@@ -263,13 +280,14 @@ impl std::fmt::Display for WhvpContext {
                  fp5 mantissa {:016x} exponent {:04x} sign {:02x}\n\
                  fp6 mantissa {:016x} exponent {:04x} sign {:02x}\n\
                  fp7 mantissa {:016x} exponent {:04x} sign {:02x}\n\
+                 ",
+                 /*
                  interrupt pending {:x} type {:x} deliver error {:x}\n    \
                      inst len {:x} nested {:x} vector {:04x}\n    \
                      error code {:08x}\n\
                  interrupt state shadow {:x} nmi masked {:x}\n\
                  pending event {:08x}\n\
-                 deliverability nmi {:x} interrupt {:x} priority {:x}\n\
-                ",
+                 deliverability nmi {:x} interrupt {:x} priority {:x}\n\*/
                 self.rax.Reg64, self.rcx.Reg64, self.rdx.Reg64,
                 self.rbx.Reg64, self.rsp.Reg64, self.rbp.Reg64,
                 self.rsi.Reg64, self.rdi.Reg64, self.r8.Reg64,
@@ -364,6 +382,7 @@ impl std::fmt::Display for WhvpContext {
                 self.st7.Fp.__bindgen_anon_1.Mantissa,
                 self.st7.Fp.__bindgen_anon_1.BiasedExponent(),
                 self.st7.Fp.__bindgen_anon_1.Sign(),
+                /*
                 self.pending_interruption.PendingInterruption.__bindgen_anon_1.InterruptionPending(),
                 self.pending_interruption.PendingInterruption.__bindgen_anon_1.InterruptionType(),
                 self.pending_interruption.PendingInterruption.__bindgen_anon_1.DeliverErrorCode(),
@@ -376,7 +395,7 @@ impl std::fmt::Display for WhvpContext {
                 self.pending_event.Reg32,
                 self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.NmiNotification(),
                 self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.InterruptNotification(),
-                self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.InterruptPriority(),
+                self.deliverability_notifications.DeliverabilityNotifications.__bindgen_anon_1.InterruptPriority(),*/
             )
         }
     }
@@ -388,6 +407,9 @@ pub struct Whvp {
 
     /// List of allocated virtual processors
     virtual_processors: Vec<u32>,
+
+    /// Number of cycles to enter the VM, fault, and exit
+    vm_run_overhead: u64,
 }
 
 impl Whvp {
@@ -398,7 +420,11 @@ impl Whvp {
 
         // Create the partition object now which will make a destructor if we
         // bail out of subsequent API calls
-        let mut ret = Whvp { partition, virtual_processors: Vec::new() };
+        let mut ret = Whvp {
+            partition,
+            virtual_processors: Vec::new(),
+            vm_run_overhead: !0,
+        };
 
         let proc_count = 1u32;
         let res = unsafe { WHvSetPartitionProperty(partition,
@@ -408,6 +434,7 @@ impl Whvp {
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 
+        /*
         let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
         unsafe {
             vmexits.__bindgen_anon_1.set_ExceptionExit(1);
@@ -425,7 +452,7 @@ impl Whvp {
             &eeb as *const u64 as *const c_void,
             std::mem::size_of_val(&eeb) as u32)
         };
-        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
+        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);*/
 
         let res = unsafe { WHvSetupPartition(partition) };
         assert!(res == 0, "WHvSetupPartition() error: {:#x}", res);
@@ -434,7 +461,44 @@ impl Whvp {
         assert!(res == 0, "WHvCreateVirtualProcessor() error: {:#x}", res);
         ret.virtual_processors.push(0);
 
+        for _ in 0..10000 {
+            let start = time::rdtsc();
+            ret.run();
+            let elapsed = time::rdtsc() - start;
+            ret.vm_run_overhead = std::cmp::min(ret.vm_run_overhead, elapsed);
+        }
+
+        print!("Computed VM run overhead to {} cycles\n", ret.vm_run_overhead);
+
         ret
+    }
+
+    /// Get the raw WHVP handle
+    pub fn handle(&self) -> WHV_PARTITION_HANDLE {
+        self.partition
+    }
+
+    /// Gets the number of cycles of overhead for a VM entry
+    pub fn overhead(&self) -> u64 {
+        self.vm_run_overhead
+    }
+
+    pub fn register_interrupt_window(&mut self) {
+        const REGINT_NAMES: &[i32] = &[
+            WHV_REGISTER_NAME_WHvX64RegisterDeliverabilityNotifications
+        ];
+
+        unsafe {
+            let mut reg_value: WHV_REGISTER_VALUE = std::mem::zeroed();
+            reg_value.DeliverabilityNotifications
+                .__bindgen_anon_1.set_InterruptNotification(1);
+
+            let res = WHvSetVirtualProcessorRegisters(self.partition, 0,
+                REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
+                &reg_value as *const WHV_REGISTER_VALUE);
+            assert!(res == 0,
+                "WHvSetVirtualProcessorRegisters() error: {:#x}", res);
+        }
     }
 
     pub fn map_memory(&mut self, addr: usize, backing: &mut [u8], perm: i32) {
@@ -475,7 +539,9 @@ impl Whvp {
         let res = unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0,
             WHVP_CONTEXT_NAMES.as_ptr(), WHVP_CONTEXT_NAMES.len() as u32,
             context as *const WhvpContext as *const WHV_REGISTER_VALUE) };
-        assert!(res == 0, "WHvSetVirtualProcessorRegisters() error: {:#x}", res);
+        assert!(res == 0,
+            "WHvSetVirtualProcessorRegisters() error: {:#x}\n{}",
+            res, context);
     }
 }
 

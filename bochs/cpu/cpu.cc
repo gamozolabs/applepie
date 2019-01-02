@@ -26,6 +26,501 @@
 
 #include "cpustats.h"
 
+#include <WinHvPlatform.h>
+#include <WinHvEmulation.h>
+
+__declspec(align(64))
+struct _whvp_context {
+  WHV_REGISTER_VALUE rax;
+  WHV_REGISTER_VALUE rcx;
+  WHV_REGISTER_VALUE rdx;
+  WHV_REGISTER_VALUE rbx;
+  WHV_REGISTER_VALUE rsp;
+  WHV_REGISTER_VALUE rbp;
+  WHV_REGISTER_VALUE rsi;
+  WHV_REGISTER_VALUE rdi;
+  WHV_REGISTER_VALUE r8;
+  WHV_REGISTER_VALUE r9;
+  WHV_REGISTER_VALUE r10;
+  WHV_REGISTER_VALUE r11;
+  WHV_REGISTER_VALUE r12;
+  WHV_REGISTER_VALUE r13;
+  WHV_REGISTER_VALUE r14;
+  WHV_REGISTER_VALUE r15;
+  WHV_REGISTER_VALUE rip;
+
+  WHV_REGISTER_VALUE rflags;
+
+  WHV_REGISTER_VALUE es;
+  WHV_REGISTER_VALUE cs;
+  WHV_REGISTER_VALUE ss;
+  WHV_REGISTER_VALUE ds;
+  WHV_REGISTER_VALUE fs;
+  WHV_REGISTER_VALUE gs;
+
+  WHV_REGISTER_VALUE ldtr;
+  WHV_REGISTER_VALUE tr;
+  WHV_REGISTER_VALUE idtr;
+  WHV_REGISTER_VALUE gdtr;
+
+  WHV_REGISTER_VALUE cr0;
+  WHV_REGISTER_VALUE cr2;
+  WHV_REGISTER_VALUE cr3;
+  WHV_REGISTER_VALUE cr4;
+  WHV_REGISTER_VALUE cr8;
+
+  WHV_REGISTER_VALUE dr0;
+  WHV_REGISTER_VALUE dr1;
+  WHV_REGISTER_VALUE dr2;
+  WHV_REGISTER_VALUE dr3;
+  WHV_REGISTER_VALUE dr6;
+  WHV_REGISTER_VALUE dr7;
+
+  WHV_REGISTER_VALUE xcr0;
+
+  WHV_REGISTER_VALUE xmm0;
+  WHV_REGISTER_VALUE xmm1;
+  WHV_REGISTER_VALUE xmm2;
+  WHV_REGISTER_VALUE xmm3;
+  WHV_REGISTER_VALUE xmm4;
+  WHV_REGISTER_VALUE xmm5;
+  WHV_REGISTER_VALUE xmm6;
+  WHV_REGISTER_VALUE xmm7;
+  WHV_REGISTER_VALUE xmm8;
+  WHV_REGISTER_VALUE xmm9;
+  WHV_REGISTER_VALUE xmm10;
+  WHV_REGISTER_VALUE xmm11;
+  WHV_REGISTER_VALUE xmm12;
+  WHV_REGISTER_VALUE xmm13;
+  WHV_REGISTER_VALUE xmm14;
+  WHV_REGISTER_VALUE xmm15;
+
+  WHV_REGISTER_VALUE st0;
+  WHV_REGISTER_VALUE st1;
+  WHV_REGISTER_VALUE st2;
+  WHV_REGISTER_VALUE st3;
+  WHV_REGISTER_VALUE st4;
+  WHV_REGISTER_VALUE st5;
+  WHV_REGISTER_VALUE st6;
+  WHV_REGISTER_VALUE st7;
+
+  WHV_REGISTER_VALUE fp_control;
+  WHV_REGISTER_VALUE xmm_control;
+
+  WHV_REGISTER_VALUE tsc;
+  WHV_REGISTER_VALUE efer;
+  WHV_REGISTER_VALUE kernel_gs_base;
+  WHV_REGISTER_VALUE apic_base;
+  WHV_REGISTER_VALUE pat;
+  WHV_REGISTER_VALUE sysenter_cs;
+  WHV_REGISTER_VALUE sysenter_eip;
+  WHV_REGISTER_VALUE sysenter_esp;
+  WHV_REGISTER_VALUE star;
+  WHV_REGISTER_VALUE lstar;
+  WHV_REGISTER_VALUE cstar;
+  WHV_REGISTER_VALUE sfmask;
+
+  WHV_REGISTER_VALUE tsc_aux;
+  //WHV_REGISTER_VALUE spec_ctrl;
+  //WHV_REGISTER_VALUE pred_cmd;
+  //WHV_REGISTER_VALUE apic_id;
+  //WHV_REGISTER_VALUE apic_version;
+  //WHV_REGISTER_VALUE pending_interruption;
+  //WHV_REGISTER_VALUE interrupt_state;
+  //WHV_REGISTER_VALUE pending_event;
+  //WHV_REGISTER_VALUE deliverability_notifications;
+  //WHV_REGISTER_VALUE internal_activity_state;
+};
+
+struct _bochs_routines {
+  void  (*set_context)(const struct _whvp_context*);
+  void  (*get_context)(struct _whvp_context*);
+  void  (*step_device)(Bit32u steps);
+  void  (*step_cpu)(Bit32u steps);
+  void* (*get_memory_backing)(Bit64u address);
+};
+
+#define SET_SEGMENT_FULL(name, bochs_seg) \
+  BX_CPU_THIS_PTR set_segment_ar_data(&bochs_seg,\
+    context->name.Segment.Present,\
+    context->name.Segment.Selector,\
+    context->name.Segment.Base,\
+    context->name.Segment.Limit,\
+    context->name.Segment.Attributes);
+
+#define SET_FP_REG(name, bochs_idx) \
+  BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].fraction  = context->name.Fp.Mantissa;\
+  BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp       = context->name.Fp.BiasedExponent;\
+  BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp      |= (context->name.Fp.Sign << 15);
+
+void* get_memory_backing(Bit64u address) {
+  return (void*)BX_CPU_THIS_PTR getHostMemAddr(address, BX_WRITE);
+}
+
+void set_context(const struct _whvp_context* context) {
+  RAX = context->rax.Reg64;
+  RCX = context->rcx.Reg64;
+  RDX = context->rdx.Reg64;
+  RBX = context->rbx.Reg64;
+  RSP = context->rsp.Reg64;
+  RBP = context->rbp.Reg64;
+  RSI = context->rsi.Reg64;
+  RDI = context->rdi.Reg64;
+  R8  = context->r8.Reg64;
+  R9  = context->r9.Reg64;
+  R10 = context->r10.Reg64;
+  R11 = context->r11.Reg64;
+  R12 = context->r12.Reg64;
+  R13 = context->r13.Reg64;
+  R14 = context->r14.Reg64;
+  R15 = context->r15.Reg64;
+  RIP = context->rip.Reg64;
+  BX_CPU_THIS_PTR setEFlags(context->rflags.Reg32);
+
+  SET_SEGMENT_FULL(es, BX_CPU_THIS_PTR sregs[BX_SEG_REG_ES]);
+  SET_SEGMENT_FULL(cs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS]);
+  SET_SEGMENT_FULL(ss, BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS]);
+  SET_SEGMENT_FULL(ds, BX_CPU_THIS_PTR sregs[BX_SEG_REG_DS]);
+  SET_SEGMENT_FULL(fs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_FS]);
+  SET_SEGMENT_FULL(gs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_GS]);
+  SET_SEGMENT_FULL(ldtr, BX_CPU_THIS_PTR ldtr);
+  SET_SEGMENT_FULL(tr, BX_CPU_THIS_PTR tr);
+
+  BX_CPU_THIS_PTR idtr.base  = context->idtr.Table.Base;
+  BX_CPU_THIS_PTR idtr.limit = context->idtr.Table.Limit;
+  BX_CPU_THIS_PTR gdtr.base  = context->gdtr.Table.Base;
+  BX_CPU_THIS_PTR gdtr.limit = context->gdtr.Table.Limit;
+
+  BX_CPU_THIS_PTR cr0.set32(context->cr0.Reg32);
+  BX_CPU_THIS_PTR cr2 = context->cr2.Reg64;
+  BX_CPU_THIS_PTR cr3 = context->cr3.Reg64;
+  BX_CPU_THIS_PTR cr4.set32(context->cr4.Reg32);
+  BX_CPU_THIS_PTR lapic.set_tpr((context->cr8.Reg32 & 0xf) << 4);
+
+  BX_CPU_THIS_PTR dr[0] = context->dr0.Reg64;
+  BX_CPU_THIS_PTR dr[1] = context->dr1.Reg64;
+  BX_CPU_THIS_PTR dr[2] = context->dr2.Reg64;
+  BX_CPU_THIS_PTR dr[3] = context->dr3.Reg64;
+  BX_CPU_THIS_PTR dr6.set32(context->dr6.Reg32);
+  BX_CPU_THIS_PTR dr7.set32(context->dr7.Reg32);
+
+  BX_CPU_THIS_PTR xcr0.set32(context->xcr0.Reg32);
+
+  memcpy(BX_READ_XMM_REG(0).xmm_u32, context->xmm0.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(1).xmm_u32, context->xmm1.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(2).xmm_u32, context->xmm2.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(3).xmm_u32, context->xmm3.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(4).xmm_u32, context->xmm4.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(5).xmm_u32, context->xmm5.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(6).xmm_u32, context->xmm6.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(7).xmm_u32, context->xmm7.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(8).xmm_u32, context->xmm8.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(9).xmm_u32, context->xmm9.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(10).xmm_u32, context->xmm10.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(11).xmm_u32, context->xmm11.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(12).xmm_u32, context->xmm12.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(13).xmm_u32, context->xmm13.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(14).xmm_u32, context->xmm14.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(15).xmm_u32, context->xmm15.Reg128.Dword, 16);
+
+  SET_FP_REG(st0, 0);
+  SET_FP_REG(st1, 1);
+  SET_FP_REG(st2, 2);
+  SET_FP_REG(st3, 3);
+  SET_FP_REG(st4, 4);
+  SET_FP_REG(st5, 5);
+  SET_FP_REG(st6, 6);
+  SET_FP_REG(st7, 7);
+
+  BX_CPU_THIS_PTR the_i387.cwd = context->fp_control.FpControlStatus.FpControl;
+  BX_CPU_THIS_PTR the_i387.swd = context->fp_control.FpControlStatus.FpStatus;
+  BX_CPU_THIS_PTR the_i387.twd = context->fp_control.FpControlStatus.FpTag;
+  BX_CPU_THIS_PTR the_i387.foo = context->fp_control.FpControlStatus.LastFpOp;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    BX_CPU_THIS_PTR the_i387.fip = context->fp_control.FpControlStatus.LastFpRip;
+  } else {
+    // Other mode state
+    BX_CPU_THIS_PTR the_i387.fip = context->fp_control.FpControlStatus.LastFpEip;
+    BX_CPU_THIS_PTR the_i387.fcs = context->fp_control.FpControlStatus.LastFpCs;
+  }
+
+  BX_CPU_THIS_PTR mxcsr.mxcsr = context->xmm_control.XmmControlStatus.XmmStatusControl;
+  BX_CPU_THIS_PTR mxcsr_mask  = context->xmm_control.XmmControlStatus.XmmStatusControlMask;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    BX_CPU_THIS_PTR the_i387.fdp = context->xmm_control.XmmControlStatus.LastFpRdp;
+  } else {
+    // Other mode state
+    BX_CPU_THIS_PTR the_i387.fdp = context->xmm_control.XmmControlStatus.LastFpDp;
+    BX_CPU_THIS_PTR the_i387.fds = context->xmm_control.XmmControlStatus.LastFpDs;
+  }
+
+  BX_CPU_THIS_PTR set_TSC(context->tsc.Reg64);
+  BX_CPU_THIS_PTR efer.set32(context->efer.Reg32);
+  BX_CPU_THIS_PTR msr.kernelgsbase = context->kernel_gs_base.Reg64;
+  BX_CPU_THIS_PTR msr.apicbase = context->apic_base.Reg64;
+  BX_CPU_THIS_PTR msr.pat._u64 = context->pat.Reg64;
+  BX_CPU_THIS_PTR msr.sysenter_cs_msr = context->sysenter_cs.Reg32;
+  BX_CPU_THIS_PTR msr.sysenter_eip_msr = context->sysenter_eip.Reg64;
+  BX_CPU_THIS_PTR msr.sysenter_esp_msr = context->sysenter_esp.Reg64;
+  BX_CPU_THIS_PTR msr.star = context->star.Reg64;
+  BX_CPU_THIS_PTR msr.lstar = context->lstar.Reg64;
+  BX_CPU_THIS_PTR msr.cstar = context->cstar.Reg64;
+  BX_CPU_THIS_PTR msr.fmask = context->sfmask.Reg32;
+  BX_CPU_THIS_PTR msr.tsc_aux = context->tsc_aux.Reg32;
+
+#if BX_CPU_LEVEL >= 4
+  BX_CPU_THIS_PTR handleAlignmentCheck(/* CR0.AC reloaded */);
+#endif
+
+  BX_CPU_THIS_PTR handleCpuModeChange();
+
+#if BX_CPU_LEVEL >= 6
+  BX_CPU_THIS_PTR handleSseModeChange();
+#if BX_SUPPORT_AVX
+  BX_CPU_THIS_PTR handleAvxModeChange();
+#endif
+#endif
+}
+
+#define GET_SEGMENT_FULL(name, bochs_seg) \
+  context->name.Segment.Base       = bochs_seg.cache.u.segment.base;\
+  context->name.Segment.Limit      = bochs_seg.cache.u.segment.limit_scaled;\
+  context->name.Segment.Selector   = bochs_seg.selector.value;\
+  context->name.Segment.Attributes = (BX_CPU_THIS_PTR get_descriptor_h(&bochs_seg.cache) >> 8) & 0xffff;
+
+#define GET_FP_REG(name, bochs_idx) \
+  context->name.Fp.Mantissa       = BX_READ_FPU_REG(bochs_idx).fraction;\
+  context->name.Fp.BiasedExponent = BX_READ_FPU_REG(bochs_idx).exp & 0x7fff;\
+  context->name.Fp.Sign           = (BX_READ_FPU_REG(bochs_idx).exp >> 15) & 1;
+
+void get_context(struct _whvp_context* context) {
+  context->rax.Reg64 = RAX;
+  context->rcx.Reg64 = RCX;
+  context->rdx.Reg64 = RDX;
+  context->rbx.Reg64 = RBX;
+  context->rsp.Reg64 = RSP;
+  context->rbp.Reg64 = RBP;
+  context->rsi.Reg64 = RSI;
+  context->rdi.Reg64 = RDI;
+  context->r8.Reg64  = R8;
+  context->r9.Reg64  = R9;
+  context->r10.Reg64 = R10;
+  context->r11.Reg64 = R11;
+  context->r12.Reg64 = R12;
+  context->r13.Reg64 = R13;
+  context->r14.Reg64 = R14;
+  context->r15.Reg64 = R15;
+  context->rip.Reg64 = RIP;
+  context->rflags.Reg64 = BX_CPU_THIS_PTR read_eflags();
+
+  GET_SEGMENT_FULL(es, BX_CPU_THIS_PTR sregs[BX_SEG_REG_ES]);
+  GET_SEGMENT_FULL(cs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS]);
+  GET_SEGMENT_FULL(ss, BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS]);
+  GET_SEGMENT_FULL(ds, BX_CPU_THIS_PTR sregs[BX_SEG_REG_DS]);
+  GET_SEGMENT_FULL(fs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_FS]);
+  GET_SEGMENT_FULL(gs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_GS]);
+
+  GET_SEGMENT_FULL(ldtr, BX_CPU_THIS_PTR ldtr);
+  GET_SEGMENT_FULL(tr, BX_CPU_THIS_PTR tr);
+  context->idtr.Table.Base  = BX_CPU_THIS_PTR idtr.base;
+  context->idtr.Table.Limit = BX_CPU_THIS_PTR idtr.limit;
+  context->gdtr.Table.Base  = BX_CPU_THIS_PTR gdtr.base;
+  context->gdtr.Table.Limit = BX_CPU_THIS_PTR gdtr.limit;
+
+  context->cr0.Reg64 = BX_CPU_THIS_PTR cr0.get32();
+  context->cr2.Reg64 = BX_CPU_THIS_PTR cr2;
+  context->cr3.Reg64 = BX_CPU_THIS_PTR cr3;
+  context->cr4.Reg64 = BX_CPU_THIS_PTR cr4.get32();
+  context->cr8.Reg64 = BX_CPU_THIS_PTR get_cr8();
+
+  context->dr0.Reg64 = BX_CPU_THIS_PTR dr[0];
+  context->dr1.Reg64 = BX_CPU_THIS_PTR dr[1];
+  context->dr2.Reg64 = BX_CPU_THIS_PTR dr[2];
+  context->dr3.Reg64 = BX_CPU_THIS_PTR dr[3];
+  context->dr6.Reg64 = BX_CPU_THIS_PTR dr6.get32();
+  context->dr7.Reg64 = BX_CPU_THIS_PTR dr7.get32();
+
+  context->xcr0.Reg64 = BX_CPU_THIS_PTR xcr0.get32();
+
+  memcpy(context->xmm0.Reg128.Dword, BX_READ_XMM_REG(0).xmm_u32, 16);
+  memcpy(context->xmm1.Reg128.Dword, BX_READ_XMM_REG(1).xmm_u32, 16);
+  memcpy(context->xmm2.Reg128.Dword, BX_READ_XMM_REG(2).xmm_u32, 16);
+  memcpy(context->xmm3.Reg128.Dword, BX_READ_XMM_REG(3).xmm_u32, 16);
+  memcpy(context->xmm4.Reg128.Dword, BX_READ_XMM_REG(4).xmm_u32, 16);
+  memcpy(context->xmm5.Reg128.Dword, BX_READ_XMM_REG(5).xmm_u32, 16);
+  memcpy(context->xmm6.Reg128.Dword, BX_READ_XMM_REG(6).xmm_u32, 16);
+  memcpy(context->xmm7.Reg128.Dword, BX_READ_XMM_REG(7).xmm_u32, 16);
+  memcpy(context->xmm8.Reg128.Dword, BX_READ_XMM_REG(8).xmm_u32, 16);
+  memcpy(context->xmm9.Reg128.Dword, BX_READ_XMM_REG(9).xmm_u32, 16);
+  memcpy(context->xmm10.Reg128.Dword, BX_READ_XMM_REG(10).xmm_u32, 16);
+  memcpy(context->xmm11.Reg128.Dword, BX_READ_XMM_REG(11).xmm_u32, 16);
+  memcpy(context->xmm12.Reg128.Dword, BX_READ_XMM_REG(12).xmm_u32, 16);
+  memcpy(context->xmm13.Reg128.Dword, BX_READ_XMM_REG(13).xmm_u32, 16);
+  memcpy(context->xmm14.Reg128.Dword, BX_READ_XMM_REG(14).xmm_u32, 16);
+  memcpy(context->xmm15.Reg128.Dword, BX_READ_XMM_REG(15).xmm_u32, 16);
+
+  GET_FP_REG(st0, 0);
+  GET_FP_REG(st1, 1);
+  GET_FP_REG(st2, 2);
+  GET_FP_REG(st3, 3);
+  GET_FP_REG(st4, 4);
+  GET_FP_REG(st5, 5);
+  GET_FP_REG(st6, 6);
+  GET_FP_REG(st7, 7);
+
+  context->fp_control.FpControlStatus.FpControl = BX_CPU_THIS_PTR the_i387.get_control_word();
+  context->fp_control.FpControlStatus.FpStatus  = BX_CPU_THIS_PTR the_i387.get_status_word();
+  context->fp_control.FpControlStatus.FpTag     = (Bit8u)BX_CPU_THIS_PTR the_i387.get_tag_word();
+  context->fp_control.FpControlStatus.LastFpOp  = BX_CPU_THIS_PTR the_i387.foo;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    context->fp_control.FpControlStatus.LastFpRip = BX_CPU_THIS_PTR the_i387.fip;
+  } else {
+    // Other mode state
+    context->fp_control.FpControlStatus.LastFpEip = (Bit32u)BX_CPU_THIS_PTR the_i387.fip;
+    context->fp_control.FpControlStatus.LastFpCs  = BX_CPU_THIS_PTR the_i387.fcs;
+  }
+
+  context->xmm_control.XmmControlStatus.XmmStatusControl     = BX_CPU_THIS_PTR mxcsr.mxcsr;
+  context->xmm_control.XmmControlStatus.XmmStatusControlMask = BX_CPU_THIS_PTR mxcsr_mask;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    context->xmm_control.XmmControlStatus.LastFpRdp = BX_CPU_THIS_PTR the_i387.fdp;
+  } else {
+    // Other mode state
+    context->xmm_control.XmmControlStatus.LastFpDp = (Bit32u)BX_CPU_THIS_PTR the_i387.fdp;
+    context->xmm_control.XmmControlStatus.LastFpDs  = BX_CPU_THIS_PTR the_i387.fds;
+  }
+
+  context->tsc.Reg64  = BX_CPU_THIS_PTR get_TSC();
+  context->efer.Reg64 = BX_CPU_THIS_PTR efer.get32();
+  context->kernel_gs_base.Reg64 = BX_CPU_THIS_PTR msr.kernelgsbase;
+  //context->apic_base.Reg64 = BX_CPU_THIS_PTR msr.apicbase;
+  context->pat.Reg64 = BX_CPU_THIS_PTR msr.pat._u64;
+  context->sysenter_cs.Reg64 = BX_CPU_THIS_PTR msr.sysenter_cs_msr;
+  context->sysenter_eip.Reg64 = BX_CPU_THIS_PTR msr.sysenter_eip_msr;
+  context->sysenter_esp.Reg64 = BX_CPU_THIS_PTR msr.sysenter_esp_msr;
+  context->star.Reg64 = BX_CPU_THIS_PTR msr.star;
+  context->lstar.Reg64 = BX_CPU_THIS_PTR msr.lstar;
+  context->cstar.Reg64 = BX_CPU_THIS_PTR msr.cstar;
+  context->sfmask.Reg64 = BX_CPU_THIS_PTR msr.fmask;
+  context->tsc_aux.Reg64 = BX_CPU_THIS_PTR msr.tsc_aux;
+}
+
+void step_cpu(Bit32u steps) {
+  BX_CPU_THIS_PTR TLB_flush();
+
+  while(steps) {
+    steps--;
+    
+    // check on events which occurred for previous instructions (traps)
+    // and ones which are asynchronous to the CPU (hardware interrupts)
+    if (BX_CPU_THIS_PTR async_event) {
+      if (BX_CPU_THIS_PTR handleAsyncEvent()) {
+        // If request to return to caller ASAP.
+        return;
+      }
+    }
+
+    bxICacheEntry_c *entry = BX_CPU_THIS_PTR getICacheEntry();
+    bxInstruction_c *i = entry->i;
+
+#if BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS
+#error chains not supported currently with bochservisor
+    {
+      // want to allow changing of the instruction inside instrumentation callback
+      BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
+      RIP += i->ilen();
+      // when handlers chaining is enabled this single call will execute entire trace
+      BX_CPU_CALL_METHOD(i->execute1, (i)); // might iterate repeat instruction
+
+      BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
+
+      if (BX_CPU_THIS_PTR async_event) continue;
+
+      i = BX_CPU_THIS_PTR getICacheEntry()->i;
+    }
+#else // BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
+
+    bxInstruction_c *last = i + (entry->tlen);
+
+    {
+
+#if BX_DEBUGGER
+      if (BX_CPU_THIS_PTR trace)
+        debug_disasm_instruction(BX_CPU_THIS_PTR prev_rip);
+#endif
+
+      if(i->execute1 == BX_CPU_C::CPUID) {
+        // Terminate so we handle in the hypervisor
+        if(BX_CPU_THIS_PTR efer.get_LMA()) {
+          return;
+        }
+      }
+
+      // want to allow changing of the instruction inside instrumentation callback
+      BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
+      RIP += i->ilen();
+      BX_CPU_CALL_METHOD(i->execute1, (i)); // might iterate repeat instruction
+      BX_CPU_THIS_PTR prev_rip = RIP; // commit new RIP
+      BX_INSTR_AFTER_EXECUTION(BX_CPU_ID, i);
+      BX_CPU_THIS_PTR icount++;
+
+      BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
+
+      // note instructions generating exceptions never reach this point
+#if BX_DEBUGGER || BX_GDBSTUB
+      if (dbg_instruction_epilog()) return;
+#endif
+
+      if (BX_CPU_THIS_PTR async_event) continue;
+
+      if (++i == last) {
+        entry = BX_CPU_THIS_PTR getICacheEntry();
+        i = entry->i;
+        last = i + (entry->tlen);
+      }
+    }
+#endif
+
+    // clear stop trace magic indication that probably was set by repeat or branch32/64
+    BX_CPU_THIS_PTR async_event &= ~BX_ASYNC_EVENT_STOP_TRACE;
+  }
+
+  BX_CPU_THIS_PTR TLB_flush();
+}
+
+void step_device(Bit32u steps) {
+  BX_CPU_THIS_PTR TLB_flush();
+
+  while(steps) {
+    steps--;
+
+    if (BX_CPU_THIS_PTR async_event) {
+      if (BX_CPU_THIS_PTR handleAsyncEvent()) {
+        // If request to return to caller ASAP.
+        return;
+      }
+
+      //step_cpu(1000);
+    }
+
+    BX_TICKN(1);
+  }
+
+  BX_CPU_THIS_PTR TLB_flush();
+}
+
+int already_booted = 0;
+struct _bochs_routines routines = { 0 };
+void (*bochs_cpu_loop)(struct _bochs_routines*) = NULL;
+
 void BX_CPU_C::cpu_loop(void)
 {
 #if BX_DEBUGGER
@@ -59,6 +554,32 @@ void BX_CPU_C::cpu_loop(void)
   // mirrors similar code below, after the interrupt() call.
   BX_CPU_THIS_PTR prev_rip = RIP; // commit new EIP
   BX_CPU_THIS_PTR speculative_rsp = 0;
+
+  if(!already_booted) {
+    already_booted = 1;
+
+    HMODULE module = LoadLibrary("..\\bochservisor\\target\\release\\bochservisor.dll");
+    if(!module) {
+      fprintf(stderr, "LoadLibrary() error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    routines.set_context        = set_context;
+    routines.get_context        = get_context;
+    routines.step_device        = step_device;
+    routines.step_cpu           = step_cpu;
+    routines.get_memory_backing = get_memory_backing;
+
+    bochs_cpu_loop = (void (*)(struct _bochs_routines*))GetProcAddress(module, "bochs_cpu_loop");
+    if(!bochs_cpu_loop) {
+      fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
+      exit(-1);
+    }
+  } else {
+    //printf("Bochs longjmped!\n");
+  }
+
+  (*bochs_cpu_loop)(&routines);
 
   while (1) {
 
@@ -200,7 +721,7 @@ bxICacheEntry_c* BX_CPU_C::getICacheEntry(void)
   INC_ICACHE_STAT(iCacheLookups);
 
   bx_phy_address pAddr = BX_CPU_THIS_PTR pAddrFetchPage + eipBiased;
-  bxICacheEntry_c *entry = BX_CPU_THIS_PTR iCache.find_entry(pAddr, BX_CPU_THIS_PTR fetchModeMask);
+  bxICacheEntry_c *entry = NULL; //BX_CPU_THIS_PTR iCache.find_entry(pAddr, BX_CPU_THIS_PTR fetchModeMask);
 
   if (entry == NULL)
   {

@@ -25034,9 +25034,9 @@ case "$target" in
       C_OPT="$C_OPT /EHs-c-"
     fi
     if test "$bx_plugins" = 1; then
-      CFLAGS="/nologo /MD /W3 /DNDEBUG /DWIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS $C_OPT"
+      CFLAGS="/nologo /Zi /Zo /FS /MD /W3 /DNDEBUG /DWIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS $C_OPT"
     else
-      CFLAGS="/nologo /MT /W3 /DNDEBUG /DWIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS $C_OPT"
+      CFLAGS="/nologo /Zi /Zo /FS /MT /W3 /DNDEBUG /DWIN32 /D_WINDOWS /D_CRT_SECURE_NO_WARNINGS $C_OPT"
     fi
     CXXFLAGS="$CFLAGS"
     DASH="/"
@@ -25047,8 +25047,8 @@ case "$target" in
     MAKE=make
     MAKELIB="lib /nologo /subsystem:console,\"5.01\" /verbose /out:\$@"
     #RMCOMMAND="-del"
-    #L_OPT="/debug"    # for debugging
-    L_OPT=""           # no debug info
+    L_OPT="/debug"    # for debugging
+    #L_OPT=""           # no debug info
     LINK="link $L_OPT /nologo /subsystem:console,\"5.01\" /incremental:no /out:\$@ "
     LINK_CONSOLE=$LINK
     EXE=".exe"

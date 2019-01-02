@@ -2286,7 +2286,7 @@ void BX_CPU_C::VMexitSaveGuestState(void)
 
 #if BX_SUPPORT_VMX >= 2
   if (VMX_MSR_MISC & VMX_MISC_STORE_LMA_TO_X86_64_GUEST_VMENTRY_CONTROL) {
-    // VMEXITs store the value of EFER.LMA into the “x86-64 guest" VMENTRY control
+    // VMEXITs store the value of EFER.LMA into the ï¿½x86-64 guest" VMENTRY control
     // must be set if unrestricted guest is supported
     if (long_mode())
        vm->vmentry_ctrls |=  VMX_VMENTRY_CTRL1_X86_64_GUEST;
@@ -2608,6 +2608,7 @@ void BX_CPU_C::VMexit(Bit32u reason, Bit64u qualification)
 #endif
 
   if (! IS_TRAP_LIKE_VMEXIT(reason)) {
+    __debugbreak();
     longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1); // go back to main decode loop
   }
 }

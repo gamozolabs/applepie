@@ -3,25 +3,34 @@
 set echo
 
 ../bochs/configure --target=x86_64-pc-windows \
+            --enable-alignment-check \
+            --enable-configurable-msrs \
+            --enable-long-phy-address \
+            --enable-a20-pin \
+            --enable-memtype \
+            --enable-perfmon \
+            --enable-fpu \
+            --enable-monitor-mwait \
+            --enable-protection-keys \
+            --enable-memtype \
+            --enable-avx \
+            --enable-3dnow \
+            --enable-svm \
             --enable-sb16 \
-            --enable-ne2000 \
-            --enable-all-optimizations \
             --enable-cpu-level=6 \
             --enable-x86-64 \
             --enable-vmx=2 \
             --enable-pci \
-            --enable-clgd54xx \
-            --enable-voodoo \
             --enable-usb \
             --enable-usb-ohci \
             --enable-usb-ehci \
             --enable-usb-xhci \
             --enable-busmouse \
-            --enable-es1370 \
             --enable-e1000 \
             --enable-show-ips \
             --disable-readline \
             --without-x \
+            --disable-large-ramfile \
             --with-win32 --with-rfb --with-nogui
 
 unset echo

@@ -6,3 +6,9 @@ edition = "2018"
 
 [dependencies]
 whvp_bindings = { path="../whvp_bindings" }
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+debug = true

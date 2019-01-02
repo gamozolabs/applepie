@@ -136,6 +136,7 @@ void BX_CPU_C::shutdown(void)
 
   enter_sleep_state(BX_ACTIVITY_STATE_SHUTDOWN);
 
+  __debugbreak();
   longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1); // go back to main decode loop
 }
 
