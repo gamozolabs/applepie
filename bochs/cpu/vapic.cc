@@ -397,7 +397,6 @@ void BX_CPU_C::VMX_Deliver_Virtual_Interrupt(void)
   BX_CPU_THIS_PTR prev_rip = RIP; // commit new RIP
   BX_CPU_THIS_PTR EXT = 0;
 
-  __debugbreak();
   // might be not necessary but cleaner code
   longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1); // go back to main decode loop
 }
@@ -455,7 +454,6 @@ void BX_CPU_C::VMX_Virtual_Apic_Access_Trap(void)
   }
 #endif
 
-  __debugbreak();
   longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1); // go back to main decode loop
 }
 

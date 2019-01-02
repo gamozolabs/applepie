@@ -2608,7 +2608,6 @@ void BX_CPU_C::VMexit(Bit32u reason, Bit64u qualification)
 #endif
 
   if (! IS_TRAP_LIKE_VMEXIT(reason)) {
-    __debugbreak();
     longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1); // go back to main decode loop
   }
 }

@@ -893,7 +893,6 @@ void BX_CPU_C::exception(unsigned vector, Bit16u error_code)
         BX_ERROR(("WARNING: Any simulation after this point is completely bogus !"));
         shutdown();
       }
-      __debugbreak();
       longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1); // go back to main decode loop
     }
 
