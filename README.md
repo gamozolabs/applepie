@@ -20,6 +20,8 @@ I like to have physical things for my projects:
 
 Currently it just boots things. However it will very quickly become a computer security tool, see the future section for more information.
 
+It hops between hypervisor and Bochs emulation thousands of times a second with no issues. This means you could do some conditional instrumentation (like "run this DLL in emulation mode") which would allow perfect coverage gathering, memory coverage, taint tracking, etc. This dynamic swiching ability is one of the core features right now.
+
 # OS Support
 
 Currently I've tested both installing and booting Windows 7 Pro inside of Bochs. I've also gotten things like FreeBSD and Linux to boot via Live CDs. I haven't tried much but it _should_ support nearly anything Bochs does.
