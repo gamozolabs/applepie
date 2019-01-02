@@ -10,18 +10,24 @@ use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use std::collections::HashMap;
 use whvp_bindings::winhvplatform::*;
 
+const BX_READ:    i32 = 0;
+const BX_WRITE:   i32 = 1;
+const BX_EXECUTE: i32 = 2;
+const BX_RW:      i32 = 3;
+
 #[repr(C)]
 pub struct BochsRoutines {
     set_context:        extern fn(context: &WhvpContext),
     get_context:        extern fn(context: &mut WhvpContext),
     step_device:        extern fn(steps: u32),
     step_cpu:           extern fn(steps: u32),
-    get_memory_backing: extern fn(addr: u64) -> usize,
+    get_memory_backing: extern fn(addr: u64, typ: i32) -> usize,
 }
 
 struct MemoryRegion {
     paddr:   usize,
     backing: usize,
+    perms:   i32,
     size:    usize,
 }
 
@@ -60,16 +66,58 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
 
             // Memory regions of (paddr, backing memory, size in bytes)
             let mut mem_regions: Vec<MemoryRegion> = Vec::new();
-            'next_mem: for paddr in (0usize..8*1024*1024*1024).step_by(4096) {
+            'next_mem: for paddr in (0usize..1*1024*1024*1024).step_by(4096) {
                 // Get the bochs memory backing for this physical address
-                let backing = (routines.get_memory_backing)(paddr as u64);
+                let backing_read    = (routines.get_memory_backing)(paddr as u64, BX_READ);
+                let backing_write   = (routines.get_memory_backing)(paddr as u64, BX_WRITE);
+                let backing_execute = (routines.get_memory_backing)(paddr as u64, BX_EXECUTE);
 
                 // Skip unmapped memory
-                if backing == 0 { continue; }
+                if backing_read == 0 && backing_write == 0 &&
+                    backing_execute == 0 { continue; }
+
+                let mut backing = None;
+                let mut perms   = 0;
+
+                if backing_read != 0 {
+                    if let Some(backing) = backing {
+                        if backing == backing_read {
+                            perms |= PERM_READ;
+                        }
+                    } else {
+                        backing = Some(backing_read);
+                        perms |= PERM_READ;
+                    }
+                }
+
+                if backing_write != 0 {
+                    if let Some(backing) = backing {
+                        if backing == backing_write {
+                            perms |= PERM_WRITE;
+                        }
+                    } else {
+                        backing = Some(backing_write);
+                        perms |= PERM_WRITE;
+                    }
+                }
+
+                if backing_execute != 0 {
+                    if let Some(backing) = backing {
+                        if backing == backing_execute {
+                            perms |= PERM_EXECUTE;
+                        }
+                    } else {
+                        backing = Some(backing_execute);
+                        perms |= PERM_EXECUTE;
+                    }
+                }
+
+                // Must be filled in by now so we can unwrap
+                let backing = backing.unwrap();
 
                 // Attempt to merge this region into another if it's contiguous
                 for mr in mem_regions.iter_mut() {
-                    if mr.paddr + mr.size == paddr && mr.backing + mr.size == backing {
+                    if mr.perms == perms && mr.paddr + mr.size == paddr && mr.backing + mr.size == backing {
                         // Allow contiguous memory in both physical and backing memory
                         // to be combined
                         mr.size += 4096;
@@ -82,13 +130,14 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
                     paddr:   paddr,
                     backing: backing,
                     size:    4096,
+                    perms:   perms,
                 });
             }
 
             // List all the memory regions
             for mr in &mem_regions {
-                print!("Memory region: start {:016x} end {:016x} backing {:016x}\n",
-                    mr.paddr, mr.paddr + mr.size - 1, mr.backing);
+                print!("Memory region: start {:016x} end {:016x} backing {:016x} perm {:02x}\n",
+                    mr.paddr, mr.paddr + mr.size - 1, mr.backing, mr.perms);
 
                 // Should never happen
                 assert!(mr.size > 0 && mr.backing > 0);
@@ -97,8 +146,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
                     std::slice::from_raw_parts_mut(mr.backing as *mut u8, mr.size)
                 };
 
-                new_hyp.map_memory(mr.paddr, sliced,
-                    PERM_READ | PERM_WRITE | PERM_EXECUTE);
+                new_hyp.map_memory(mr.paddr, sliced, mr.perms);
             }
 
             let handle = new_hyp.handle() as usize;

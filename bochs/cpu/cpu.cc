@@ -137,7 +137,7 @@ struct _bochs_routines {
   void  (*get_context)(struct _whvp_context*);
   void  (*step_device)(Bit32u steps);
   void  (*step_cpu)(Bit32u steps);
-  void* (*get_memory_backing)(Bit64u address);
+  void* (*get_memory_backing)(Bit64u address, int type);
 };
 
 #define SET_SEGMENT_FULL(name, bochs_seg) \
@@ -153,8 +153,8 @@ struct _bochs_routines {
   BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp       = context->name.Fp.BiasedExponent;\
   BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp      |= (context->name.Fp.Sign << 15);
 
-void* get_memory_backing(Bit64u address) {
-  return (void*)BX_CPU_THIS_PTR getHostMemAddr(address, BX_WRITE);
+void* get_memory_backing(Bit64u address, int type) {
+  return (void*)BX_CPU_THIS_PTR getHostMemAddr(address, type);
 }
 
 void set_context(const struct _whvp_context* context) {
@@ -459,9 +459,7 @@ void step_cpu(Bit32u steps) {
 
       if(i->execute1 == BX_CPU_C::CPUID) {
         // Terminate so we handle in the hypervisor
-        if(BX_CPU_THIS_PTR efer.get_LMA()) {
-          return;
-        }
+        return;
       }
 
       // want to allow changing of the instruction inside instrumentation callback
