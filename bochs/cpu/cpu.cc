@@ -25,9 +25,9 @@
 #define LOG_THIS BX_CPU_THIS_PTR
 
 #include "cpustats.h"
+#include "param_names.h"
 
 #include <WinHvPlatform.h>
-#include <WinHvEmulation.h>
 
 __declspec(align(64))
 struct _whvp_context {
@@ -135,8 +135,8 @@ struct _whvp_context {
 struct _bochs_routines {
   void  (*set_context)(const struct _whvp_context*);
   void  (*get_context)(struct _whvp_context*);
-  void  (*step_device)(Bit32u steps);
-  void  (*step_cpu)(Bit32u steps);
+  void  (*step_device)(Bit64u steps);
+  void  (*step_cpu)(Bit64u steps);
   void* (*get_memory_backing)(Bit64u address, int type);
 };
 
@@ -413,7 +413,7 @@ void get_context(struct _whvp_context* context) {
   context->tsc_aux.Reg64 = BX_CPU_THIS_PTR msr.tsc_aux;
 }
 
-void step_cpu(Bit32u steps) {
+void step_cpu(Bit64u steps) {
   BX_CPU_THIS_PTR TLB_flush();
 
   while(steps) {
@@ -432,14 +432,12 @@ void step_cpu(Bit32u steps) {
     bxInstruction_c *i = entry->i;
 
 #if BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS
-#error chains not supported currently with bochservisor
     {
       // want to allow changing of the instruction inside instrumentation callback
       BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
       RIP += i->ilen();
       // when handlers chaining is enabled this single call will execute entire trace
       BX_CPU_CALL_METHOD(i->execute1, (i)); // might iterate repeat instruction
-
       BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
 
       if (BX_CPU_THIS_PTR async_event) continue;
@@ -456,11 +454,6 @@ void step_cpu(Bit32u steps) {
       if (BX_CPU_THIS_PTR trace)
         debug_disasm_instruction(BX_CPU_THIS_PTR prev_rip);
 #endif
-
-      if(i->execute1 == BX_CPU_C::CPUID) {
-        // Terminate so we handle in the hypervisor
-        return;
-      }
 
       // want to allow changing of the instruction inside instrumentation callback
       BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
@@ -494,30 +487,23 @@ void step_cpu(Bit32u steps) {
   BX_CPU_THIS_PTR TLB_flush();
 }
 
-void step_device(Bit32u steps) {
-  BX_CPU_THIS_PTR TLB_flush();
-
+void step_device(Bit64u steps) {
   while(steps) {
-    steps--;
-
     if (BX_CPU_THIS_PTR async_event) {
       if (BX_CPU_THIS_PTR handleAsyncEvent()) {
         // If request to return to caller ASAP.
         return;
       }
-
-      //step_cpu(1000);
     }
 
-    BX_TICKN(1);
+    bx_pc_system.tickn(1);
+    steps--;
   }
-
-  BX_CPU_THIS_PTR TLB_flush();
 }
 
 int already_booted = 0;
 struct _bochs_routines routines = { 0 };
-void (*bochs_cpu_loop)(struct _bochs_routines*) = NULL;
+void (*bochs_cpu_loop)(struct _bochs_routines*, Bit64u) = NULL;
 
 void BX_CPU_C::cpu_loop(void)
 {
@@ -556,6 +542,29 @@ void BX_CPU_C::cpu_loop(void)
   if(!already_booted) {
     already_booted = 1;
 
+    // Enforce IPS is what we expect
+    Bit64u ips = SIM->get_param_num(BXPN_IPS)->get();
+    if(ips != 1000000) {
+      fprintf(stderr, "Bochservisor requires ips=1000000 in your bochsrc!\n");
+      exit(-1);
+    }
+
+    // We only support single core right now, enforce that
+    Bit64u procs   = SIM->get_param_num(BXPN_CPU_NPROCESSORS)->get();
+    Bit64u cores   = SIM->get_param_num(BXPN_CPU_NCORES)->get();
+    Bit64u threads = SIM->get_param_num(BXPN_CPU_NTHREADS)->get();
+    if(procs != 1 || cores != 1 || threads != 1) {
+      fprintf(stderr, "Bochservisor requires procs=cores=threads=1 in your bochsrc!\n");
+      exit(-1);
+    }
+
+    // Make sure clock syncing is set to none
+    int clock_sync = SIM->get_param_enum(BXPN_CLOCK_SYNC)->get();
+    if(clock_sync != BX_CLOCK_SYNC_NONE) {
+      fprintf(stderr, "Bochservisor requires clock: sync=none in your bochsrc!\n");
+      exit(-1);
+    }
+
     HMODULE module = LoadLibrary("..\\bochservisor\\target\\release\\bochservisor.dll");
     if(!module) {
       fprintf(stderr, "LoadLibrary() error : %d\n", GetLastError());
@@ -568,7 +577,7 @@ void BX_CPU_C::cpu_loop(void)
     routines.step_cpu           = step_cpu;
     routines.get_memory_backing = get_memory_backing;
 
-    bochs_cpu_loop = (void (*)(struct _bochs_routines*))GetProcAddress(module, "bochs_cpu_loop");
+    bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u))GetProcAddress(module, "bochs_cpu_loop");
     if(!bochs_cpu_loop) {
       fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
       exit(-1);
@@ -577,10 +586,9 @@ void BX_CPU_C::cpu_loop(void)
     //printf("Bochs longjmped!\n");
   }
 
-  (*bochs_cpu_loop)(&routines);
+  (*bochs_cpu_loop)(&routines, BX_MEM(0)->get_memory_len());
 
   while (1) {
-
     // check on events which occurred for previous instructions (traps)
     // and ones which are asynchronous to the CPU (hardware interrupts)
     if (BX_CPU_THIS_PTR async_event) {

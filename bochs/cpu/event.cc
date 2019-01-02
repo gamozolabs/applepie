@@ -99,6 +99,9 @@ bx_bool BX_CPU_C::handleWaitForEvent(void)
       return 1; // Return to caller of cpu_loop.
     }
 
+    // BOCHSERVISOR: On halts return out to CPU loop to allow for ticking
+    return 0;
+
     BX_TICKN(10); // when in HLT run time faster for single CPU
   }
 

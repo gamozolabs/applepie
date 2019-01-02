@@ -3,6 +3,7 @@
 set echo
 
 ../bochs/configure --target=x86_64-pc-windows \
+            --enable-all-optimizations \
             --enable-alignment-check \
             --enable-configurable-msrs \
             --enable-long-phy-address \

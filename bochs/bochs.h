@@ -192,8 +192,16 @@ void print_statistics_tree(bx_param_c *node, int level = 0);
 // #define BX_OUTP(addr, val, len)  bx_pc_system.outp(addr, val, len)
 #define BX_INP(addr, len)           bx_devices.inp(addr, len)
 #define BX_OUTP(addr, val, len)     bx_devices.outp(addr, val, len)
+
+#define BOCHSERVISOR
+#ifdef BOCHSERVISOR
+#define BX_TICK1()
+#define BX_TICKN(n)
+#else
 #define BX_TICK1()                  bx_pc_system.tick1()
 #define BX_TICKN(n)                 bx_pc_system.tickn(n)
+#endif
+
 #define BX_INTR                     bx_pc_system.INTR
 #define BX_RAISE_INTR()             bx_pc_system.raise_INTR()
 #define BX_CLEAR_INTR()             bx_pc_system.clear_INTR()

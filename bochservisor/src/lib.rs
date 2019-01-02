@@ -7,20 +7,18 @@ pub mod time;
 use std::cell::RefCell;
 use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
-use std::collections::HashMap;
 use whvp_bindings::winhvplatform::*;
 
 const BX_READ:    i32 = 0;
 const BX_WRITE:   i32 = 1;
 const BX_EXECUTE: i32 = 2;
-const BX_RW:      i32 = 3;
 
 #[repr(C)]
 pub struct BochsRoutines {
     set_context:        extern fn(context: &WhvpContext),
     get_context:        extern fn(context: &mut WhvpContext),
-    step_device:        extern fn(steps: u32),
-    step_cpu:           extern fn(steps: u32),
+    step_device:        extern fn(steps: u64),
+    step_cpu:           extern fn(steps: u64),
     get_memory_backing: extern fn(addr: u64, typ: i32) -> usize,
 }
 
@@ -45,28 +43,48 @@ fn kicker(handle: usize) {
     }
 }
 
+// Due to bochs using longjmps we must place a lot of state in this structure
+// so we don't lose it when our code suddenly gets hijacked and reenters from
+// the start
+#[derive(Default)]
+struct PersistState {
+    hypervisor:       Option<Whvp>,
+    tickrate:         Option<f64>,
+    future_report:    u64,
+    start:            u64,
+    vm_elapsed:       u64,
+    last_sync_cycles: u64,
+}
+
 thread_local! {
-    static HYPERVISOR: RefCell<Option<Whvp>> = RefCell::new(None);
+    static PERSIST: RefCell<PersistState> = RefCell::new(Default::default());
 }
 
 #[no_mangle]
-pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
-    let mut context = WhvpContext::default();
+pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
+    assert!(pmem_size & 0xfff == 0,
+        "Physical memory size was not 4 KiB aligned");
 
-    const TARGET_IPS: f64 = 100000000.0;
-    let tickrate = time::calibrate_tsc();
+    const TARGET_IPS: f64 = 1000000.0;
 
-    HYPERVISOR.with(|x| {
-        let mut hypervisor = x.borrow_mut();
+    PERSIST.with(|x| {
+        let mut persist = x.borrow_mut();
 
-        if hypervisor.is_none() {
+        // Create a context to be used for all register sync operations
+        let mut context = WhvpContext::default();
+
+        if persist.tickrate.is_none() {
+            persist.tickrate = Some(time::calibrate_tsc());
+        }
+
+        if persist.hypervisor.is_none() {
             print!("Creating hypervisor!\n");
 
             let mut new_hyp = Whvp::new();
 
             // Memory regions of (paddr, backing memory, size in bytes)
             let mut mem_regions: Vec<MemoryRegion> = Vec::new();
-            'next_mem: for paddr in (0usize..1*1024*1024*1024).step_by(4096) {
+            'next_mem: for paddr in (0usize..pmem_size as usize).step_by(4096) {
                 // Get the bochs memory backing for this physical address
                 let backing_read    = (routines.get_memory_backing)(paddr as u64, BX_READ);
                 let backing_write   = (routines.get_memory_backing)(paddr as u64, BX_WRITE);
@@ -112,6 +130,12 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
                     }
                 }
 
+                // Don't map BIOS memory. There's some weird read/write states
+                // we cannot accurately reflect with EPT.
+                if paddr >= 0x000c0000 && paddr < 0x00100000 {
+                    continue;
+                }
+
                 // Must be filled in by now so we can unwrap
                 let backing = backing.unwrap();
 
@@ -152,32 +176,36 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
             let handle = new_hyp.handle() as usize;
             std::thread::spawn(move || kicker(handle));
 
-            *hypervisor = Some(new_hyp);
-        } else {
-            //print!("Skipping hypervisor creation as it already exists\n");
+            persist.hypervisor = Some(new_hyp);
+
+            persist.future_report = time::rdtsc() + persist.tickrate.unwrap() as u64;
+            persist.start = time::rdtsc();
+            persist.vm_elapsed = 0;
+            persist.last_sync_cycles = time::rdtsc();
         }
-        let hypervisor = hypervisor.as_mut().unwrap();
 
         let mut emulating = 0;
 
-        let mut vmexits = HashMap::new();
-        let mut num_vmexits = 0u64;
-
-        let mut future_report = time::rdtsc() + tickrate as u64;
-
-        let mut start = time::rdtsc();
-        let mut vm_elapsed = 0;
-
         loop {
-            if time::rdtsc() >= future_report {
-                let total_cycles = time::rdtsc() - start;
-                print!("VM run percentage {:8.6}\n",
-                    vm_elapsed as f64 / total_cycles as f64);
-                print!("{:#?}\n", vmexits);
-                future_report = time::rdtsc() + tickrate as u64;
+            {
+                let current_time = time::rdtsc();
+                let elapsed_cycles = current_time
+                    .saturating_sub(persist.last_sync_cycles);
+                persist.last_sync_cycles = current_time;
+                let elapsed_secs = elapsed_cycles as f64 / persist.tickrate.unwrap();
 
-                vm_elapsed = 0;
-                start = time::rdtsc();
+                let elapsed_adj_cycles = (TARGET_IPS * elapsed_secs) as u64;
+                (routines.step_device)(elapsed_adj_cycles);
+            }
+
+            if time::rdtsc() >= persist.future_report {
+                let total_cycles = time::rdtsc() - persist.start;
+
+                print!("VM run percentage {:8.6} | Uptime {:14.6}\n",
+                    persist.vm_elapsed as f64 / total_cycles as f64,
+                    total_cycles as f64 / persist.tickrate.unwrap());
+
+                persist.future_report = time::rdtsc() + persist.tickrate.unwrap() as u64;
             }
 
             if emulating > 0 {
@@ -186,54 +214,63 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines) {
                 continue;
             }
 
-            //print!("Running hypervisor\n");
+            // Sync bochs register state to hypervisor register state
             (routines.get_context)(&mut context);
-            hypervisor.set_context(&context);
-            let pre_rip = context.rip();
-            let start = time::rdtsc();
-            let vmexit = hypervisor.run();
-            let elapsed = time::rdtsc() - start;
-            let vm_run_time = elapsed.saturating_sub(hypervisor.overhead());
-            vm_elapsed += vm_run_time;
-            let elapsed_secs = vm_run_time as f64 / tickrate;
-            context = hypervisor.get_context();
+            persist.hypervisor.as_mut().unwrap().set_context(&context);
+
+            let vmstart_cycles = time::rdtsc();
+            let vmexit = persist.hypervisor.as_mut().unwrap().run();
+            let elapsed = time::rdtsc() - vmstart_cycles;
+            let vm_run_time = elapsed.saturating_sub(persist.hypervisor.as_mut().unwrap().overhead());
+            persist.vm_elapsed += vm_run_time;
+
+            // Sync hypervisor register state to bochs register state
+            context = persist.hypervisor.as_mut().unwrap().get_context();
             (routines.set_context)(&context);
-            let post_rip = context.rip();
 
-            if post_rip != pre_rip {
-                let elapsed_adj_cycles = (TARGET_IPS * elapsed_secs) as u32;
-                (routines.step_device)(elapsed_adj_cycles);
+            if vm_run_time > 1000000000 {
+                print!("Ran for a really long time\n");
             }
-
-            //print!("Hypervisor ran for {}\n", elapsed);
-
-            if !vmexits.contains_key(&vmexit.ExitReason) {
-                vmexits.insert(vmexit.ExitReason, 0u64);
-            }
-            *vmexits.get_mut(&vmexit.ExitReason).unwrap() += 1;
-            num_vmexits += 1;
 
             match vmexit.ExitReason {
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => {
-                    /*print!("Mem fault on PA {:016x}\n", unsafe {
-                        vmexit.__bindgen_anon_1.MemoryAccess.Gpa
-                    });*/
-
-                    emulating += 1000;
+                    // Emulate MMIO
+                    emulating = 100;
+                    continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
-                    emulating += 1000;
+                    // Emulate I/O
+                    emulating = 100;
+                    continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => {
-                    emulating += 1000;
+                    // Emulate halts
+                    emulating = 100;
+                    continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => {
                     if (unsafe { context.rflags.Reg64 } & (1 << 9)) == 0 {
-                        hypervisor.register_interrupt_window();
+                        // If interrupts are masked request to be notified next
+                        // time they are enabled
+                        persist.hypervisor.as_mut().unwrap().register_interrupt_window();
                     }
                 }
-                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {}
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonInvalidVpRegisterValue => {
+                    // This was observed in Windows 7, however if we emulate a
+                    // bit the issue seems to go away. So that's our "solution"
+                    print!("Warning: Invalid VP state, emulating for a bit\n");
+                    emulating = 100;
+                }
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
+                    // We got an interrupt window! Well we don't have to do
+                    // anything as now bochs knows it can deliver async events
+                    // and will when we `step_device()`
+                }
                 _ => {
+                    // Hard panic on unhandled vmexits. This will dump the
+                    // context and print the reason. These will probably be
+                    // common for a while until we test more and more OSes under
+                    // this hypervisor.
                     print!("{}\n", context);
                     panic!("Unhandled VM exit reason {}", vmexit.ExitReason);
                 }

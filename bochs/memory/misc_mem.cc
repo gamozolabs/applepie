@@ -822,6 +822,8 @@ BX_MEM_C::registerMemoryHandlers(void *param, memory_handler_t read_handler,
                 memory_handler_t write_handler, memory_direct_access_handler_t da_handler,
                 bx_phy_address begin_addr, bx_phy_address end_addr)
 {
+  printf("Registering handler for %I64x %I64x\n", begin_addr, end_addr);
+  
   if (end_addr < begin_addr)
     return 0;
   if (!read_handler) // allow NULL write and fetch handler

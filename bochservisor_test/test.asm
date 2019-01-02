@@ -16,6 +16,11 @@ loop:
     mov cx, 80
     rep stosw
 
+.lewp:
+    in al, dx
+    ;add eax, 5
+    jmp short .lewp
+
 .halt:
     hlt
     jmp short .halt

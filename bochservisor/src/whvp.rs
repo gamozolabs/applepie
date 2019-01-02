@@ -412,6 +412,12 @@ pub struct Whvp {
     vm_run_overhead: u64,
 }
 
+impl Default for Whvp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Whvp {
     pub fn new() -> Self {
         let mut partition: WHV_PARTITION_HANDLE = std::ptr::null_mut();
