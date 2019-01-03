@@ -3,12 +3,18 @@
 
 pub mod whvp;
 pub mod time;
+pub mod virtmem;
+pub mod win32;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use whvp_bindings::winhvplatform::*;
+use crate::win32::get_modlist_user;
+
+/// Unknown module name
+const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
 
 // Bochs permissions used for `get_memory_backing`
 const BX_READ:    i32 = 0;
@@ -165,12 +171,161 @@ struct PersistState {
 
     /// VM exit reason frequencies
     vmexits: HashMap<VmExitReason, u64>,
+
+    /// Memory reader for physical and virtual access
+    memory: MemReader,
+
+    /// Code coverage information per module
+    coverage: HashMap<String, HashSet<usize>>,
 }
 
 thread_local! {
     /// Thread locals. I really hate this but it's the only way to survive the
     /// re-entry due to Bochs using `longjmp()`
     static PERSIST: RefCell<PersistState> = RefCell::new(Default::default());
+}
+
+#[derive(Default)]
+pub struct MemReader {
+    /// List of all of the memory regions mapped into the guest physical space
+    regions: Vec<MemoryRegion>
+}
+
+impl MemReader {
+    /// Create a new memory reader based on a list of memory regions
+    fn new(memory_regions: Vec<MemoryRegion>) -> Self {
+        MemReader { regions: memory_regions }
+    }
+
+    /// Read physical memory at `paddr` into an output buffer. Returns number
+    /// of bytes read, this may be smaller than `output.len()` on partial reads
+    pub fn read_phys(&mut self, paddr: usize, output: &mut [u8]) -> usize {
+        // Sanity check
+        assert!(output.len() > 0, "Output buffer was zero size");
+
+        // Track number of bytes read
+        let mut bread = 0usize;
+
+        while bread < output.len() {
+            for mr in &self.regions {
+                // Check if this address falls in this region
+                if paddr >= mr.paddr {
+                    // Compute offset and remainder of region
+                    let offset = paddr - mr.paddr;
+                    let remain = mr.size.saturating_sub(offset);
+
+                    // Nothing in this region for us
+                    if remain <= 0 { continue; }
+
+                    // Convert to Rust slice
+                    let region = unsafe {
+                        std::slice::from_raw_parts(
+                            mr.backing as *const u8, mr.size)
+                    };
+
+                    // Compute bytes to copy
+                    let remain = std::cmp::min(output.len() - bread, remain);
+
+                    // Copy bytes
+                    output[bread..bread+remain].copy_from_slice(
+                        &region[offset..offset+remain]);
+
+                    // Update read amount
+                    bread += remain;
+                }
+            }
+        }
+
+        bread
+    }
+
+    /// Read virtual memory at `vaddr` using page table `cr3` into `buf`.
+    /// Returns number of bytes read (can be less than `buf.len()` on error)
+    pub fn read_virt(&mut self, cr3: usize, vaddr: usize,
+                     buf: &mut [u8]) -> usize
+    {
+        // Cached physical translation
+        let mut guest_phys = 0;
+
+        // Go through each byte
+        for offset in 0..buf.len() {
+            // Update translation on new pages
+            if (guest_phys & 0xfff) == 0 {
+                // Translate vaddr to paddr
+                let mut guest_pt = unsafe {
+                    virtmem::PageTable::from_existing(cr3 as *mut u64, self)
+                };
+                guest_phys = match guest_pt.virt_to_phys_dirty(
+                        (vaddr + offset) as u64, false).unwrap() {
+                    Some((phys, _)) => phys,
+                    None            => return offset,
+                };
+            }
+
+            // Read one byte from memory
+            if self.read_phys(guest_phys as usize,
+                    &mut buf[offset..offset+1]) != 1 {
+                // Failed to read, return bytes read to this point
+                return offset;
+            }
+
+            // Update physical pointer
+            guest_phys += 1;
+        }
+
+        // Return bytes read
+        buf.len()
+    }
+
+    /// Read a usize from `vaddr` in page table `cr3`. Panics on error.
+    pub fn read_virt_usize(&mut self, cr3: usize, addr: usize) -> usize {
+        let mut val = [0u8; 8];
+        assert!(self.read_virt(cr3, addr, &mut val) == val.len());
+        usize::from_le_bytes(val)
+    }
+}
+
+impl virtmem::PhysMem for MemReader {
+    fn alloc_page(&mut self) -> Option<*mut u8> {
+        panic!("Alloc page not supported");
+    }
+
+    fn read_phys_int(&mut self, addr: *mut u64) -> Result<u64, &'static str> {
+        let mut buf = [0u8; 8];
+        assert!(self.read_phys(addr as usize, &mut buf) == buf.len());
+        Ok(u64::from_le_bytes(buf))
+    }
+
+    fn write_phys(&mut self, _addr: *mut u64,
+            _val: u64) ->Result<(), &'static str> {
+        panic!("write_phys not supported");
+    }
+
+    fn probe_vaddr(&mut self, _addr: usize, _length: usize) -> bool {
+        panic!("probe_vaddr not supported");
+    }
+}
+
+/// Dump the coverage table to the console
+fn dump_coverage(coverage: &HashMap<String, HashSet<usize>>) {
+    if coverage.len() > 0 {
+        print!("Coverage:\n");
+    }
+
+    let mut sum = 0;
+    let mut named_sum = 0;
+
+    for (module, offsets) in coverage.iter() {
+        print!("{:32} | {:7} unique offsets\n", module, offsets.len());
+
+        if module != UNKNOWN_MODULE_NAME { named_sum += offsets.len(); }
+        sum += offsets.len();
+    }
+
+    if coverage.len() > 0 {
+        print!("Module coverage: {:10}\n", named_sum);
+        print!("Coverage total:  {:10}\n", sum);
+    }
 }
 
 /// Rust CPU loop for Bochs which uses both emulation and hypervisor for running
@@ -333,6 +488,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Save the hypervisor into the persitent storage
             persist.hypervisor = Some(new_hyp);
 
+            // Create a memory accessor
+            persist.memory = MemReader::new(mem_regions);
+
             // Compute first report time
             persist.future_report =
                 time::rdtsc() + persist.tickrate.unwrap() as u64;
@@ -352,6 +510,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
         // When this is 0 we use the hypervisor, when this is non-zero we run
         // that many steps in Bochses emulator
         let mut emulating = 0;
+
+        // Number of times to single step in the hypervisor
+        let mut single_step = 0;
 
         loop {
             {
@@ -400,6 +561,8 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 // Print vmexit reason frequencies
                 print!("{:#?}\n", persist.vmexits);
 
+                dump_coverage(&persist.coverage);
+
                 // Update the next report time
                 persist.future_report = time::rdtsc() +
                     persist.tickrate.unwrap() as u64;
@@ -415,8 +578,21 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 continue;
             }
 
-            // Sync bochs register state to hypervisor register state
+            // Get bochs register state to hypervisor register state
             (routines.get_context)(&mut context);
+
+            if single_step > 0 {
+                unsafe {
+                    if (context.rflags.Reg64 & (1 << 8)) == 0 {
+                        // Only single step if the TF is not already set
+                        // in the guest
+                        context.rflags.Reg64 |= 1 << 8;
+                        single_step -= 1;
+                    }
+                }
+            }
+
+            // Write out register state
             persist.hypervisor.as_mut().unwrap().set_context(&context);
 
             // Get the current TSC
@@ -439,7 +615,32 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
             // Sync hypervisor register state to Bochs register state
             context = persist.hypervisor.as_mut().unwrap().get_context();
+            unsafe { context.rflags.Reg64 &= !(1 << 8); }
             (routines.set_context)(&context);
+
+            {
+                // Quick and dirty coverage
+                let modlist = get_modlist_user(&context, &mut persist.memory);
+
+                // Get the module offset for this RIP
+                let (module, offset) =
+                    modlist.get_modoff(context.rip() as usize);
+
+                // Treat none as an unknown module
+                let module = module.unwrap_or(UNKNOWN_MODULE_NAME);
+
+                // Create a new entry for this module
+                if !persist.coverage.contains_key(module) {
+                    persist.coverage.insert(module.into(), HashSet::new());
+                }
+
+                // Insert this offset into the module's coverage
+                let module_entry = persist.coverage.get_mut(module).unwrap();
+                if module_entry.insert(offset) {
+                    // First time seeing this coverage
+                    single_step = 100;
+                }
+            }
 
             // Record the exit reason frequencies
             let vmer = VmExitReason::from_whvp(vmexit.ExitReason);
@@ -496,13 +697,36 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // bit the issue seems to go away. So that's our "solution".
                     // Not sure which state is going bad here, or if it's some
                     // CPUID/MSR desync issue with Bochs
-                    print!("Warning: Invalid VP state, emulating for a bit\n");
+                    //print!("Warning: Invalid VP state, emulating for a bit\n");
                     emulating = 100;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
                     // We got an interrupt window! Well we don't have to do
                     // anything as now Bochs knows it can deliver async events
                     // and will when we `step_device()`
+                }
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException => {
+                    // Got a debug break exception, disable TF
+                    unsafe {
+                        let dr6 = context.dr6.Reg64;
+
+                        if (dr6 & (1 << 14)) == 0 {
+                            panic!("Got an unexpected #DB exception");
+                        }
+
+                        // Clear the dr6.BS flag
+                        context.dr6.Reg64 &= !(1 << 14);
+
+                        // Clear the eflags.TF
+                        context.rflags.Reg64 &= !(1 << 8);
+                    }
+
+                    // Save updated context
+                    (routines.set_context)(&context);
+
+                    // Clear that this exception happened
+                    persist.hypervisor.as_mut()
+                        .unwrap().clear_pending_exception();
                 }
                 _ => {
                     // Hard panic on unhandled vmexits. This will dump the

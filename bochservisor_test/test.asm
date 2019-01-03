@@ -16,10 +16,15 @@ loop:
     mov cx, 80
     rep stosw
 
-.lewp:
-    in al, dx
-    ;add eax, 5
-    jmp short .lewp
+    mov byte [0x8000], 0x12
+    mov byte [0x8001], 0x34
+    mov byte [0x8002], 0x56
+    mov byte [0x8003], 0x78
+    mov byte [0x8004], 0x9a
+    mov byte [0x8005], 0xbc
+    mov byte [0x8006], 0xde
+    mov byte [0x8007], 0xf0
+    mov byte [0x8008], 0x99
 
 .halt:
     hlt

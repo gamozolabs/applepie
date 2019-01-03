@@ -446,6 +446,24 @@ impl Whvp {
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 
+        let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
+        unsafe {
+            vmexits.__bindgen_anon_1.set_ExceptionExit(1);
+        }
+        let res = unsafe { WHvSetPartitionProperty(partition,
+            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExtendedVmExits,
+            &vmexits as *const WHV_EXTENDED_VM_EXITS as *const c_void,
+            std::mem::size_of_val(&vmexits) as u32)
+        };
+        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
+        let eeb: u64 = 1 << 1;
+        let res = unsafe { WHvSetPartitionProperty(partition,
+            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExceptionExitBitmap,
+            &eeb as *const u64 as *const c_void,
+            std::mem::size_of_val(&eeb) as u32)
+        };
+        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
+
         // Setup the partition, not sure what this does but it's just how the
         // API works
         let res = unsafe { WHvSetupPartition(partition) };
@@ -562,6 +580,24 @@ impl Whvp {
         assert!(res == 0,
             "WHvSetVirtualProcessorRegisters() error: {:#x}\n{}",
             res, context);
+    }
+
+    // Clear a pending exception
+    pub fn clear_pending_exception(&mut self) {
+        // List of names
+        const REGINT_NAMES: &[i32] = &[
+            WHV_REGISTER_NAME_WHvRegisterPendingEvent
+        ];
+
+        let event: WHV_X64_PENDING_EXCEPTION_EVENT =
+            unsafe { std::mem::zeroed() };
+
+        let res = unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0,
+            REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
+            &event as *const WHV_X64_PENDING_EXCEPTION_EVENT as *const WHV_REGISTER_VALUE) };
+        assert!(res == 0,
+            "WHvSetVirtualProcessorRegisters() error: {:#x}",
+            res);
     }
 }
 
