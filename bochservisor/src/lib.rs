@@ -529,6 +529,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
         // that many steps in Bochses emulator
         let mut emulating = 0;
 
+        // Tracks the numbers of cancels in a row
+        let mut canceled_in_a_row = 0;
+
         // Number of times to single step in the hypervisor
         let mut single_step = 0;
 
@@ -586,6 +589,12 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     persist.tickrate.unwrap() as u64;
             }
 
+            if canceled_in_a_row > 100 {
+                //print!("Lots of cancels, emulating a bit\n");
+                emulating = 100;
+                canceled_in_a_row = 0;
+            }
+
             // If we're requesting emulation, step using Bochs
             if emulating > 0 {
                 // Emulate instructions with Bochs!
@@ -637,7 +646,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             unsafe { context.rflags.Reg64 &= !(1 << 8); }
             (routines.set_context)(&context);
 
-            {
+            if false {
                 // Quick and dirty coverage
                 if let Ok(modlist) =
                         get_modlist_user(&context, &mut persist.memory) {
@@ -679,6 +688,10 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Update frequency
             *persist.vmexits.get_mut(&vmer).unwrap() += 1;   
 
+            if vmexit.ExitReason != WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled {
+                canceled_in_a_row = 0;
+            }
+
             // Determine the reason the hypervisor exited
             match vmexit.ExitReason {
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => {
@@ -709,6 +722,8 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => {
+                    canceled_in_a_row += 1;
+
                     // Check if rflags.IF=0
                     if (unsafe { context.rflags.Reg64 } & (1 << 9)) == 0 {
                         // If interrupts are disabled, request to be notified
