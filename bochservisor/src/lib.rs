@@ -1,10 +1,13 @@
 #![feature(asm)]
 #![allow(non_upper_case_globals)]
 
+#[macro_use] extern crate serde_derive;
+
 pub mod whvp;
 pub mod time;
 pub mod virtmem;
 pub mod win32;
+pub mod symloader;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -12,6 +15,7 @@ use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use whvp_bindings::winhvplatform::*;
 use crate::win32::get_modlist_user;
+use crate::symloader::Symbols;
 
 /// Unknown module name
 const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
@@ -177,6 +181,9 @@ struct PersistState {
 
     /// Code coverage information per module
     coverage: HashMap<String, HashSet<usize>>,
+
+    /// Symbols
+    symbols: Symbols,
 }
 
 thread_local! {
@@ -492,6 +499,13 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Save the hypervisor into the persitent storage
             persist.hypervisor = Some(new_hyp);
 
+            // Load symbols from disk
+            if let Ok(symbols) = Symbols::load() {
+                persist.symbols = symbols;
+            } else {
+                print!("Warning: Failed to load symbols\n");
+            }
+
             // Create a memory accessor
             persist.memory = MemReader::new(mem_regions);
 
@@ -585,6 +599,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Get bochs register state to hypervisor register state
             (routines.get_context)(&mut context);
 
+            // If we're single stepping set eflags.TF
             if single_step > 0 {
                 unsafe {
                     if (context.rflags.Reg64 & (1 << 8)) == 0 {
@@ -642,6 +657,11 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     let module_entry =
                         persist.coverage.get_mut(module).unwrap();
                     if module_entry.insert(offset) {
+                        if let Some(sym) = 
+                                persist.symbols.resolve(module, offset) {
+                            print!("{}\n", sym);
+                        }
+
                         // First time seeing this coverage
                         single_step = 100;
                     }
