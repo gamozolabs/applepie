@@ -67,7 +67,7 @@ impl ModuleList {
 /// Currently only for user-mode applications
 /// On failure may return a 0 sized module list
 pub fn get_modlist_user(context: &WhvpContext,
-        memory: &mut MemReader) -> ModuleList {
+        memory: &mut MemReader) -> Result<ModuleList, ()> {
     let mut ret = ModuleList::new();
 
     // Get information about the guest state
@@ -78,19 +78,19 @@ pub fn get_modlist_user(context: &WhvpContext,
     // Make sure we have a GS, we're in userspace, and we're also 64-bit
     if !(gs_base != 0 && lma &&
             (unsafe { context.cs.Segment.Selector } & 3) == 3) {
-        return ret;
+        return Ok(ret);
     }
 
     // Look up the PEB from the TEB
-    let peb_ptr = memory.read_virt_usize(cr3, gs_base + 0x60);
+    let peb_ptr = memory.read_virt_usize(cr3, gs_base + 0x60)?;
 
     // Get the _PEB_LDR_DATA structure pointer 
-    let peb_ldr_ptr = memory.read_virt_usize(cr3, peb_ptr + 0x18);
+    let peb_ldr_ptr = memory.read_virt_usize(cr3, peb_ptr + 0x18)?;
 
     // Get the first pointer to the InLoadOrderModuleList
     // This type is of _LDR_DATA_TABLE_ENTRY
-    let mut flink = memory.read_virt_usize(cr3, peb_ldr_ptr + 0x10);
-    let blink     = memory.read_virt_usize(cr3, peb_ldr_ptr + 0x18);
+    let mut flink = memory.read_virt_usize(cr3, peb_ldr_ptr + 0x10)?;
+    let blink     = memory.read_virt_usize(cr3, peb_ldr_ptr + 0x18)?;
 
     // This should never happen
     assert!(blink != 0, "No blink");
@@ -98,23 +98,28 @@ pub fn get_modlist_user(context: &WhvpContext,
     // Loop while we have entries in the list
     while flink != 0 {
         // Get base and length
-        let base = memory.read_virt_usize(cr3, flink + 0x30);
-        let len  = memory.read_virt_usize(cr3, flink + 0x40) as u32 as usize;
+        let base = memory.read_virt_usize(cr3, flink + 0x30)?;
+        let len  = memory.read_virt_usize(cr3, flink + 0x40)? as u32 as usize;
 
         // Get the name length and pointer
-        let namelen = memory.read_virt_usize(cr3, flink + 0x58) as u16 as usize;
-        let nameptr = memory.read_virt_usize(cr3, flink + 0x60);
+        let namelen = memory.read_virt_usize(cr3, flink + 0x58)? as u16 as usize;
+        let nameptr = memory.read_virt_usize(cr3, flink + 0x60)?;
 
         // Skip this entry if it doesn't seem sane
         if nameptr == 0 || namelen == 0 || (namelen % 2) != 0 {
             if flink == blink { break; }
-            flink = memory.read_virt_usize(cr3, flink);
+            flink = memory.read_virt_usize(cr3, flink)?;
             continue;
         }
         
         // Make room and read the UTF-16 name
         let mut name = vec![0u8; namelen];
-        assert!(memory.read_virt(cr3, nameptr, &mut name) == namelen);
+        if memory.read_virt(cr3, nameptr, &mut name) != namelen {
+            // Name might be paged out, skip entry
+            if flink == blink { break; }
+            flink = memory.read_virt_usize(cr3, flink)?;
+            continue;
+        }
 
         // Convert the module name into a UTF-8 Rust string
         let name_utf8 = String::from_utf16(unsafe {
@@ -132,8 +137,8 @@ pub fn get_modlist_user(context: &WhvpContext,
 
         // Go to the next module
         if flink == blink { break; }
-        flink = memory.read_virt_usize(cr3, flink);
+        flink = memory.read_virt_usize(cr3, flink)?;
     }
 
-    ret
+    Ok(ret)
 }

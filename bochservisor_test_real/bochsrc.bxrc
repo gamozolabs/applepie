@@ -5,12 +5,12 @@ display_library: win32
 memory: host=2048, guest=1024
 romimage: file="C:\dev\bochs\bochs\bios/BIOS-bochs-latest", address=0x00000000, options="fastboot"
 vgaromimage: file="C:\dev\bochs\bochs\bios/VGABIOS-lgpl-latest"
-boot: cdrom
+boot: disk
 floppy_bootsig_check: disabled=0
 # no floppya
 # no floppyb
 ata0: enabled=true, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
-#ata0-master: type=disk, path="windows_for_bochs.vhd", mode=vpc
+ata0-master: type=disk, path="windows_for_bochs.vhd", mode=vpc
 ata0-slave: type=cdrom, path="en_windows_7_professional_x64_dvd_x15-65805.iso", status=inserted, model="Generic 1234", biosdetect=auto
 ata1: enabled=true, ioaddr1=0x170, ioaddr2=0x370, irq=15
 ata1-master: type=none

@@ -278,10 +278,14 @@ impl MemReader {
     }
 
     /// Read a usize from `vaddr` in page table `cr3`. Panics on error.
-    pub fn read_virt_usize(&mut self, cr3: usize, addr: usize) -> usize {
+    pub fn read_virt_usize(&mut self, cr3: usize,
+            addr: usize) -> Result<usize, ()> {
         let mut val = [0u8; 8];
-        assert!(self.read_virt(cr3, addr, &mut val) == val.len());
-        usize::from_le_bytes(val)
+        if self.read_virt(cr3, addr, &mut val) == val.len() {
+            Ok(usize::from_le_bytes(val))
+        } else {
+            Err(())
+        }
     }
 }
 
@@ -620,25 +624,27 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
             {
                 // Quick and dirty coverage
-                let modlist = get_modlist_user(&context, &mut persist.memory);
+                if let Ok(modlist) =
+                        get_modlist_user(&context, &mut persist.memory) {
+                    // Get the module offset for this RIP
+                    let (module, offset) =
+                        modlist.get_modoff(context.rip() as usize);
 
-                // Get the module offset for this RIP
-                let (module, offset) =
-                    modlist.get_modoff(context.rip() as usize);
+                    // Treat none as an unknown module
+                    let module = module.unwrap_or(UNKNOWN_MODULE_NAME);
 
-                // Treat none as an unknown module
-                let module = module.unwrap_or(UNKNOWN_MODULE_NAME);
+                    // Create a new entry for this module
+                    if !persist.coverage.contains_key(module) {
+                        persist.coverage.insert(module.into(), HashSet::new());
+                    }
 
-                // Create a new entry for this module
-                if !persist.coverage.contains_key(module) {
-                    persist.coverage.insert(module.into(), HashSet::new());
-                }
-
-                // Insert this offset into the module's coverage
-                let module_entry = persist.coverage.get_mut(module).unwrap();
-                if module_entry.insert(offset) {
-                    // First time seeing this coverage
-                    single_step = 100;
+                    // Insert this offset into the module's coverage
+                    let module_entry =
+                        persist.coverage.get_mut(module).unwrap();
+                    if module_entry.insert(offset) {
+                        // First time seeing this coverage
+                        single_step = 100;
+                    }
                 }
             }
 
