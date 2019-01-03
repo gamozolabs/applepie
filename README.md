@@ -12,7 +12,7 @@ This is a rapidly developing project. I'll probably tweet when new features go o
 
 # Hype Video
 
-[![IMAGE ALT TEXT HERE](https://img.youtube.com/vi/AIlHigJsXYw/0.jpg)](https://www.youtube.com/watch?v=AIlHigJsXYw)
+[![Youtube Video](https://img.youtube.com/vi/AIlHigJsXYw/0.jpg)](https://www.youtube.com/watch?v=AIlHigJsXYw)
 
 # Mascot
 
