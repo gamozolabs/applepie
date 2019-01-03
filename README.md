@@ -14,6 +14,10 @@ This is a rapidly developing project. I'll probably tweet when new features go o
 
 [![Youtube Video](https://img.youtube.com/vi/AIlHigJsXYw/0.jpg)](https://www.youtube.com/watch?v=AIlHigJsXYw)
 
+# Binary Coverage Example
+
+[![Youtube Video](https://img.youtube.com/vi/S1D433EwktE/0.jpg)](https://www.youtube.com/watch?v=S1D433EwktE)
+
 # Mascot
 
 I like to have physical things for my projects:
