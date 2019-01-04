@@ -5,7 +5,7 @@ display_library: win32
 memory: host=2048, guest=1024
 romimage: file="C:\dev\bochs\bochs\bios/BIOS-bochs-latest", address=0x00000000, options="fastboot"
 vgaromimage: file="C:\dev\bochs\bochs\bios/VGABIOS-lgpl-latest"
-boot: cdrom
+boot: disk
 floppy_bootsig_check: disabled=0
 # no floppya
 # no floppyb
@@ -43,9 +43,9 @@ keyboard: type=mf, serial_delay=250, paste_delay=100000, user_shortcut=none
 mouse: type=ps2, enabled=false, toggle=ctrl+mbutton
 sound: waveoutdrv=win, waveout="/dev/dsp.wavein=", waveindrv=win, wavein=none, midioutdrv=win, midiout=none
 speaker: enabled=true, mode=sound
-parport1: enabled=true, file="parport.out"
+parport1: enabled=false
 parport2: enabled=false
-com1: enabled=true, mode=null
+com1: enabled=false
 com2: enabled=false
 com3: enabled=false
 com4: enabled=false

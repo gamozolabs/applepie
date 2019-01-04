@@ -446,21 +446,17 @@ impl Whvp {
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 
+        // Enable vmexits on certain events
         let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
         unsafe {
-            vmexits.__bindgen_anon_1.set_ExceptionExit(1);
+            vmexits.__bindgen_anon_1.set_ExceptionExit(0);
+            vmexits.__bindgen_anon_1.set_X64MsrExit(0);
+            vmexits.__bindgen_anon_1.set_X64CpuidExit(0);
         }
         let res = unsafe { WHvSetPartitionProperty(partition,
             WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExtendedVmExits,
             &vmexits as *const WHV_EXTENDED_VM_EXITS as *const c_void,
             std::mem::size_of_val(&vmexits) as u32)
-        };
-        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
-        let eeb: u64 = 1 << 1;
-        let res = unsafe { WHvSetPartitionProperty(partition,
-            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExceptionExitBitmap,
-            &eeb as *const u64 as *const c_void,
-            std::mem::size_of_val(&eeb) as u32)
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 

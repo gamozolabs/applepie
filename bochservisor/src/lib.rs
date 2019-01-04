@@ -16,6 +16,7 @@ use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use whvp_bindings::winhvplatform::*;
 use crate::win32::get_modlist_user;
 use crate::symloader::Symbols;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Unknown module name
 const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
@@ -48,6 +49,13 @@ pub struct BochsRoutines {
     /// `typ` from Bochs. The access type should be a combination of the
     /// `BX_READ`, `BX_WRITE`, and `BX_EXECUTE` constants
     get_memory_backing: extern fn(addr: u64, typ: i32) -> usize,
+
+    // Get the CPUID result from Bochs for a given leaf:subleaf combination
+    cpuid: extern fn(leaf: u32, subleaf: u32, eax: &mut u32, ebx: &mut u32,
+        ecx: &mut u32, edx: &mut u32),
+
+    /// Write an MSR `value` to the MSR specified by `index`
+    write_msr: extern fn(index: u32, value: u64),
 }
 
 /// Named structure for tracking memory regions in Bochs
@@ -67,6 +75,8 @@ struct MemoryRegion {
     /// Size of the memory region
     size: usize,
 }
+
+static KICKER_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// Kicker thread. This thread kicks the WHVP partition approx. 1000 times per
 /// second to give us an opportunity to step a bit in Bochs and emulate devices
@@ -89,9 +99,16 @@ fn kicker(handle: usize) {
 
     // Kick forever
     loop {
+        while KICKER_ACTIVE.load(Ordering::SeqCst) == 0 {}
+
         // Busyloop until the time has elapsed
         let future = time::rdtsc() + advance;
-        while time::rdtsc() < future {}
+        while KICKER_ACTIVE.load(Ordering::SeqCst) != 0 &&
+            time::rdtsc() < future {}
+
+        // Potentially the kicker was deactivated by this point, so skip the
+        // cancel
+        if KICKER_ACTIVE.load(Ordering::SeqCst) == 0 { continue; }
 
         // Kick the hypervisor to cause it to exit
         unsafe { WHvCancelRunVirtualProcessor(handle, 0, 0); }
@@ -529,12 +546,6 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
         // that many steps in Bochses emulator
         let mut emulating = 0;
 
-        // Tracks the numbers of cancels in a row
-        let mut canceled_in_a_row = 0;
-
-        // Number of times to single step in the hypervisor
-        let mut single_step = 0;
-
         loop {
             {
                 // Get the current TSC
@@ -588,13 +599,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 persist.future_report = time::rdtsc() +
                     persist.tickrate.unwrap() as u64;
             }
-
-            if canceled_in_a_row > 100 {
-                //print!("Lots of cancels, emulating a bit\n");
-                emulating = 100;
-                canceled_in_a_row = 0;
-            }
-
+            
             // If we're requesting emulation, step using Bochs
             if emulating > 0 {
                 // Emulate instructions with Bochs!
@@ -605,29 +610,17 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 continue;
             }
 
-            // Get bochs register state to hypervisor register state
+            // Sync bochs register state to hypervisor register state
             (routines.get_context)(&mut context);
-
-            // If we're single stepping set eflags.TF
-            if single_step > 0 {
-                unsafe {
-                    if (context.rflags.Reg64 & (1 << 8)) == 0 {
-                        // Only single step if the TF is not already set
-                        // in the guest
-                        context.rflags.Reg64 |= 1 << 8;
-                        single_step -= 1;
-                    }
-                }
-            }
-
-            // Write out register state
             persist.hypervisor.as_mut().unwrap().set_context(&context);
 
             // Get the current TSC
             let vmstart_cycles = time::rdtsc();
 
             // Run the hypervisor until exit!
+            KICKER_ACTIVE.store(1, Ordering::SeqCst);
             let vmexit = persist.hypervisor.as_mut().unwrap().run();
+            KICKER_ACTIVE.store(0, Ordering::SeqCst);
 
             // Compute number of cycles spent in the call to `vm.run()`
             let elapsed = time::rdtsc() - vmstart_cycles;
@@ -643,7 +636,6 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
             // Sync hypervisor register state to Bochs register state
             context = persist.hypervisor.as_mut().unwrap().get_context();
-            unsafe { context.rflags.Reg64 &= !(1 << 8); }
             (routines.set_context)(&context);
 
             if false {
@@ -672,7 +664,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                         }
 
                         // First time seeing this coverage
-                        single_step = 100;
+                        emulating = 100;
                     }
                 }
             }
@@ -688,10 +680,6 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Update frequency
             *persist.vmexits.get_mut(&vmer).unwrap() += 1;   
 
-            if vmexit.ExitReason != WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled {
-                canceled_in_a_row = 0;
-            }
-
             // Determine the reason the hypervisor exited
             match vmexit.ExitReason {
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => {
@@ -700,7 +688,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating = 100;
+                    emulating = 10;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
@@ -709,7 +697,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating = 100;
+                    emulating = 10;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => {
@@ -718,12 +706,10 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating = 100;
+                    emulating = 10;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => {
-                    canceled_in_a_row += 1;
-
                     // Check if rflags.IF=0
                     if (unsafe { context.rflags.Reg64 } & (1 << 9)) == 0 {
                         // If interrupts are disabled, request to be notified
@@ -740,34 +726,37 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // CPUID/MSR desync issue with Bochs
                     //print!("Warning: Invalid VP state, emulating for a bit\n");
                     emulating = 100;
+                    continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
                     // We got an interrupt window! Well we don't have to do
                     // anything as now Bochs knows it can deliver async events
                     // and will when we `step_device()`
                 }
-                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException => {
-                    // Got a debug break exception, disable TF
-                    unsafe {
-                        let dr6 = context.dr6.Reg64;
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess => {
+                    // Handle MSR read/writes
+                    let msr_context: &WHV_X64_MSR_ACCESS_CONTEXT =
+                        unsafe { &vmexit.__bindgen_anon_1.MsrAccess };
 
-                        if (dr6 & (1 << 14)) == 0 {
-                            panic!("Got an unexpected #DB exception");
-                        }
-
-                        // Clear the dr6.BS flag
-                        context.dr6.Reg64 &= !(1 << 14);
-
-                        // Clear the eflags.TF
-                        context.rflags.Reg64 &= !(1 << 8);
+                    if unsafe { msr_context.AccessInfo.__bindgen_anon_1.IsWrite() } != 0 {
+                        let value = (msr_context.Rdx << 32) | msr_context.Rax;
+                        print!("Writing to msr index {:x} value {:x}\n",
+                            msr_context.MsrNumber, value);
+                        (routines.write_msr)(msr_context.MsrNumber, value);
+                    } else {
+                        panic!("Tried to read msr {:x}\n", msr_context.MsrNumber);
                     }
 
-                    // Save updated context
-                    (routines.set_context)(&context);
+                    unsafe {
+                        context.rip.Reg64 +=
+                            vmexit.VpContext.InstructionLength() as u64;
+                    }
 
-                    // Clear that this exception happened
-                    persist.hypervisor.as_mut()
-                        .unwrap().clear_pending_exception();
+                    // Update register state
+                    (routines.set_context)(&context);
+                    persist.hypervisor.as_mut().unwrap().set_context(&context);
+                    emulating = 0;
+                    continue;
                 }
                 _ => {
                     // Hard panic on unhandled vmexits. This will dump the

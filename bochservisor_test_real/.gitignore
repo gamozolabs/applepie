@@ -2,3 +2,6 @@
 *.iso
 *.vhd
 symbols
+*.log
+windows
+parse.py

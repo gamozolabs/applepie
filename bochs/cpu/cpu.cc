@@ -142,7 +142,27 @@ struct _bochs_routines {
   void  (*step_device)(Bit64u steps);
   void  (*step_cpu)(Bit64u steps);
   void* (*get_memory_backing)(Bit64u address, int type);
+  void  (*cpuid)(Bit32u leaf, Bit32u subleaf, Bit32u *eax,
+    Bit32u *ebx, Bit32u *ecx, Bit32u *edx);
+  void  (*write_msr)(Bit32u index, Bit64u value);
 };
+
+void write_msr(Bit32u index, Bit64u value) {
+  BX_CPU_THIS_PTR wrmsr(index, value);
+}
+
+void do_cpuid(Bit32u leaf, Bit32u subleaf, Bit32u *eax,
+    Bit32u *ebx, Bit32u *ecx, Bit32u *edx)
+{
+  struct cpuid_function_t result = { 0 };
+
+  BX_CPU_THIS_PTR cpuid->get_cpuid_leaf(leaf, subleaf, &result);
+
+  *eax = result.eax;
+  *ebx = result.ebx;
+  *ecx = result.ecx;
+  *edx = result.edx;
+}
 
 // Set helper for bochs segments
 #define SET_SEGMENT_FULL(name, bochs_seg) \
@@ -419,7 +439,7 @@ void get_context(struct _whvp_context* context) {
   context->tsc.Reg64  = BX_CPU_THIS_PTR get_TSC();
   context->efer.Reg64 = BX_CPU_THIS_PTR efer.get32();
   context->kernel_gs_base.Reg64 = BX_CPU_THIS_PTR msr.kernelgsbase;
-  //context->apic_base.Reg64 = BX_CPU_THIS_PTR msr.apicbase;
+  context->apic_base.Reg64 = BX_CPU_THIS_PTR msr.apicbase;
   context->pat.Reg64 = BX_CPU_THIS_PTR msr.pat._u64;
   context->sysenter_cs.Reg64 = BX_CPU_THIS_PTR msr.sysenter_cs_msr;
   context->sysenter_eip.Reg64 = BX_CPU_THIS_PTR msr.sysenter_eip_msr;
@@ -593,6 +613,12 @@ void BX_CPU_C::cpu_loop(void)
       exit(-1);
     }
 
+    unsigned cpu_model = SIM->get_param_enum(BXPN_CPU_MODEL)->get();
+    if(!cpu_model || strcmp(SIM->get_param_enum(BXPN_CPU_MODEL)->get_selected(), "corei7_skylake_x")) {
+      fprintf(stderr, "Bochservisor requires corei7_skylake_x cpu model!\n");
+      exit(-1);
+    }
+
     // We only support single core right now, enforce that
     Bit64u procs   = SIM->get_param_num(BXPN_CPU_NPROCESSORS)->get();
     Bit64u cores   = SIM->get_param_num(BXPN_CPU_NCORES)->get();
@@ -622,6 +648,8 @@ void BX_CPU_C::cpu_loop(void)
     routines.step_device        = step_device;
     routines.step_cpu           = step_cpu;
     routines.get_memory_backing = get_memory_backing;
+    routines.cpuid              = do_cpuid;
+    routines.write_msr          = write_msr;
 
     // Lookup the address of the Rust CPU look implementation in the DLL
     bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u))
