@@ -725,7 +725,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // Not sure which state is going bad here, or if it's some
                     // CPUID/MSR desync issue with Bochs
                     //print!("Warning: Invalid VP state, emulating for a bit\n");
-                    emulating = 100;
+                    emulating = 10;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
@@ -735,27 +735,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess => {
                     // Handle MSR read/writes
-                    let msr_context: &WHV_X64_MSR_ACCESS_CONTEXT =
-                        unsafe { &vmexit.__bindgen_anon_1.MsrAccess };
-
-                    if unsafe { msr_context.AccessInfo.__bindgen_anon_1.IsWrite() } != 0 {
-                        let value = (msr_context.Rdx << 32) | msr_context.Rax;
-                        print!("Writing to msr index {:x} value {:x}\n",
-                            msr_context.MsrNumber, value);
-                        (routines.write_msr)(msr_context.MsrNumber, value);
-                    } else {
-                        panic!("Tried to read msr {:x}\n", msr_context.MsrNumber);
-                    }
-
-                    unsafe {
-                        context.rip.Reg64 +=
-                            vmexit.VpContext.InstructionLength() as u64;
-                    }
-
-                    // Update register state
-                    (routines.set_context)(&context);
-                    persist.hypervisor.as_mut().unwrap().set_context(&context);
-                    emulating = 0;
+                    emulating = 10;
                     continue;
                 }
                 _ => {

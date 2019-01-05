@@ -95,6 +95,7 @@ void BX_CPP_AttrRegparmN(1) BX_CPU_C::CPUID(bxInstruction_c *i)
 {
   Bit64u laddr = RIP + BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS].cache.u.segment.base;
 
+  // BOCHSERVISOR
   // Terminate so we handle in the hypervisor
   // There are some CPUIDs called in the BIOS that we cannot run in the
   // hypervisor and this is a hack because I don't dump CPUID tables.
@@ -106,6 +107,8 @@ void BX_CPP_AttrRegparmN(1) BX_CPU_C::CPUID(bxInstruction_c *i)
     printf("BYPASSING CPUID\n");
     longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1);
   }
+
+  printf("WARNING: EMULATED CPUID\n");
 
 #if BX_CPU_LEVEL >= 4
 

@@ -450,7 +450,7 @@ impl Whvp {
         let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
         unsafe {
             vmexits.__bindgen_anon_1.set_ExceptionExit(0);
-            vmexits.__bindgen_anon_1.set_X64MsrExit(0);
+            vmexits.__bindgen_anon_1.set_X64MsrExit(1);
             vmexits.__bindgen_anon_1.set_X64CpuidExit(0);
         }
         let res = unsafe { WHvSetPartitionProperty(partition,
