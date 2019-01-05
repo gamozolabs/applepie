@@ -57,21 +57,6 @@ pub struct PageTable<'a, T: 'a + PhysMem> {
 
 impl<'a, T: 'a + PhysMem> PageTable<'a, T>
 {
-    /// Create a new, empty page table
-    ///
-    /// Unsafe as it is up to the caller to make sure the alloc_page() function
-    /// actually correctly allocates pages.
-    pub unsafe fn new(physmem: &'a mut T) -> PageTable<'a, T>
-    {
-        let backing = physmem.alloc_page().unwrap();
-        core::ptr::write_bytes(backing, 0, 4096);
-
-        PageTable {
-            physmem,
-            backing: backing as *mut u64,
-        }
-    }
-
     pub unsafe fn from_existing(existing: *mut u64, physmem: &'a mut T) ->
         PageTable<'a, T>
     {
@@ -99,8 +84,9 @@ impl<'a, T: 'a + PhysMem> PageTable<'a, T>
             let mut cur = self.backing;
 
             /* Non-canonical addresses not translatable */
-            assert!(canonicalize_address(vaddr) == vaddr,
-                "Virtual address to virt_to_phys() not canonical");
+            if canonicalize_address(vaddr) != vaddr {
+                return Err("Virtual address to virt_to_phys() not canonical");
+            }
             
             /* Calculate the components for each level of the page table from
              * the vaddr.
@@ -137,7 +123,7 @@ impl<'a, T: 'a + PhysMem> PageTable<'a, T>
                         /* PageSize bit set on PML4E (512 GiB page) MBZ */
                         0 => {
                             /* PS bit must be zero on PML4Es */
-                            panic!("PageSize bit set on PML4E");
+                            return Err("PageSize bit set on PML4E");
                         },
 
                         /* PageSize bit set on PDPE (1 GiB page) */

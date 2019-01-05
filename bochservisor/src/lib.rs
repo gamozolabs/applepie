@@ -1,12 +1,11 @@
 #![feature(asm)]
 #![allow(non_upper_case_globals)]
 
-#[macro_use] extern crate serde_derive;
-
 pub mod whvp;
 pub mod time;
 pub mod virtmem;
 pub mod win32;
+pub mod symdumper;
 pub mod symloader;
 
 use std::cell::RefCell;
@@ -17,6 +16,7 @@ use whvp_bindings::winhvplatform::*;
 use crate::win32::get_modlist_user;
 use crate::symloader::Symbols;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::win32::ModuleInfo;
 
 /// Unknown module name
 const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
@@ -197,7 +197,7 @@ struct PersistState {
     memory: MemReader,
 
     /// Code coverage information per module
-    coverage: HashMap<String, HashSet<usize>>,
+    coverage: HashMap<ModuleInfo<'static>, HashSet<usize>>,
 
     /// Symbols
     symbols: Symbols,
@@ -231,6 +231,8 @@ impl MemReader {
         let mut bread = 0usize;
 
         while bread < output.len() {
+            let mut matched_something = false;
+            
             for mr in &self.regions {
                 // Check if this address falls in this region
                 if paddr >= mr.paddr {
@@ -256,9 +258,20 @@ impl MemReader {
 
                     // Update read amount
                     bread += remain;
+                    matched_something = true;
+
+                    if bread >= output.len() {
+                        assert!(bread == output.len(), "Whoa we overshot");
+                        return bread;
+                    }
                 }
             }
+
+            // Failed to find a region that contains this byte, bail out
+            if !matched_something { break; }
         }
+
+        assert!(bread < output.len(), "Success path shouldn't go here");
 
         bread
     }
@@ -280,9 +293,9 @@ impl MemReader {
                     virtmem::PageTable::from_existing(cr3 as *mut u64, self)
                 };
                 guest_phys = match guest_pt.virt_to_phys_dirty(
-                        (vaddr + offset) as u64, false).unwrap() {
-                    Some((phys, _)) => phys,
-                    None            => return offset,
+                        (vaddr + offset) as u64, false) {
+                    Ok(Some((phys, _))) => phys,
+                    _                   => return offset,
                 };
             }
 
@@ -320,7 +333,9 @@ impl virtmem::PhysMem for MemReader {
 
     fn read_phys_int(&mut self, addr: *mut u64) -> Result<u64, &'static str> {
         let mut buf = [0u8; 8];
-        assert!(self.read_phys(addr as usize, &mut buf) == buf.len());
+        if self.read_phys(addr as usize, &mut buf) != buf.len() {
+            return Err("Failed to read physical memory");
+        }
         Ok(u64::from_le_bytes(buf))
     }
 
@@ -335,7 +350,7 @@ impl virtmem::PhysMem for MemReader {
 }
 
 /// Dump the coverage table to the console
-fn dump_coverage(coverage: &HashMap<String, HashSet<usize>>) {
+fn dump_coverage(coverage: &HashMap<ModuleInfo<'static>, HashSet<usize>>) {
     if coverage.len() > 0 {
         print!("Coverage:\n");
     }
@@ -344,9 +359,9 @@ fn dump_coverage(coverage: &HashMap<String, HashSet<usize>>) {
     let mut named_sum = 0;
 
     for (module, offsets) in coverage.iter() {
-        print!("{:32} | {:7} unique offsets\n", module, offsets.len());
+        print!("{:32} | {:7} unique offsets\n", module.name(), offsets.len());
 
-        if module != UNKNOWN_MODULE_NAME { named_sum += offsets.len(); }
+        if module.name() != UNKNOWN_MODULE_NAME { named_sum += offsets.len(); }
         sum += offsets.len();
     }
 
@@ -516,12 +531,13 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Save the hypervisor into the persitent storage
             persist.hypervisor = Some(new_hyp);
 
+            /*
             // Load symbols from disk
             if let Ok(symbols) = Symbols::load() {
                 persist.symbols = symbols;
             } else {
                 print!("Warning: Failed to load symbols\n");
-            }
+            }*/
 
             // Create a memory accessor
             persist.memory = MemReader::new(mem_regions);
@@ -638,33 +654,32 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             context = persist.hypervisor.as_mut().unwrap().get_context();
             (routines.set_context)(&context);
 
-            if false {
+            if true {
                 // Quick and dirty coverage
                 if let Ok(modlist) =
                         get_modlist_user(&context, &mut persist.memory) {
                     // Get the module offset for this RIP
-                    let (module, offset) =
+                    let (modinfo, offset) =
                         modlist.get_modoff(context.rip() as usize);
 
-                    // Treat none as an unknown module
-                    let module = module.unwrap_or(UNKNOWN_MODULE_NAME);
-
-                    // Create a new entry for this module
-                    if !persist.coverage.contains_key(module) {
-                        persist.coverage.insert(module.into(), HashSet::new());
-                    }
-
-                    // Insert this offset into the module's coverage
-                    let module_entry =
-                        persist.coverage.get_mut(module).unwrap();
-                    if module_entry.insert(offset) {
-                        if let Some(sym) = 
-                                persist.symbols.resolve(module, offset) {
-                            print!("{}\n", sym);
+                    if let Some(module) = modinfo {
+                        // Create a new entry for this module
+                        if !persist.coverage.contains_key(module) {
+                            persist.coverage.insert(module.deepclone(), HashSet::new());
                         }
 
-                        // First time seeing this coverage
-                        emulating = 100;
+                        // Insert this offset into the module's coverage
+                        let module_entry =
+                            persist.coverage.get_mut(&module.deepclone()).unwrap();
+                        if module_entry.insert(offset) {
+                            if let Some(sym) = 
+                                    persist.symbols.resolve(module, offset) {
+                                print!("{}\n", sym);
+                            }
+
+                            // First time seeing this coverage
+                            //emulating = 100;
+                        }
                     }
                 }
             }

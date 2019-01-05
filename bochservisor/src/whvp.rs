@@ -228,6 +228,11 @@ impl WhvpContext {
     pub fn rip(&self) -> u64 {
         unsafe { self.cs.Segment.Base.wrapping_add(self.rip.Reg64) }
     }
+
+    /// Gets the CR3 for the VM with the reserved and PCID bits masked off
+    pub fn cr3(&self) -> u64 {
+        unsafe { self.cr3.Reg64 & 0xFFFFFFFFFF000 }
+    }
 }
 
 impl Default for WhvpContext {

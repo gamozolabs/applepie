@@ -35,7 +35,7 @@ elif len(sys.argv) == 2 and sys.argv[1] == "clean":
     subprocess.check_call(["cargo", "clean"])
     os.chdir("..")
 else:
-    # Buld bochservisor
+    # Build bochservisor
     os.chdir("bochservisor")
     subprocess.check_call(["cargo", "build", "--release"])
     os.chdir("..")

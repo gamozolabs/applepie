@@ -1,17 +1,50 @@
 use crate::MemReader;
 use crate::whvp::WhvpContext;
 use std::fmt::Write;
+use std::borrow::Cow;
+
+/// All information to uniquely identify a module
+#[derive(PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Debug)]
+pub struct ModuleInfo<'a> {
+    name:          Cow<'a, str>,
+    timedatestamp: u32,
+    sizeofimage:   u32,
+}
+
+impl<'a> ModuleInfo<'a> {
+    /// Create a new `ModuleInfo`
+    pub fn new(module: Cow<'a, str>, timedatestamp: u32, sizeofimage: u32) -> Self {
+        ModuleInfo {
+            name: module.into(),
+            timedatestamp,
+            sizeofimage
+        }
+    }
+
+    /// Clones a `ModuleInfo` to change the lifetime
+    pub fn deepclone<'b>(&self) -> ModuleInfo<'b> {
+        ModuleInfo {
+            name:          self.name.to_string().into(),
+            timedatestamp: self.timedatestamp,
+            sizeofimage:   self.sizeofimage
+        }
+    }
+
+    pub fn name(&self) -> &str { &self.name }
+    pub fn time(&self) -> u32  { self.timedatestamp }
+    pub fn size(&self) -> u32  { self.sizeofimage }
+}
 
 /// Module entry
 pub struct ModuleEntry {
-    // Base address of the module
+    /// Info to uniquely identify this module
+    info: ModuleInfo<'static>,
+
+    /// Base address of the module
     base: usize,
 
-    // Length (in bytes) of the module
+    /// Length (in bytes) of the module
     len: usize,
-
-    // Module name
-    name: String,
 }
 
 /// Group of modules
@@ -32,12 +65,12 @@ impl ModuleList {
     }
 
     /// Get the module offset representation of a virtual address
-    pub fn get_modoff(&self, vaddr: usize) -> (Option<&str>, usize) {
+    pub fn get_modoff(&self, vaddr: usize) -> (Option<&ModuleInfo>, usize) {
         for module in &self.modules {
             if vaddr >= module.base &&
                     vaddr < module.base.checked_add(module.len).unwrap() {
                 let offset = vaddr - module.base;
-                return (Some(&module.name), offset);
+                return (Some(&module.info), offset);
             }
         }
 
@@ -48,9 +81,9 @@ impl ModuleList {
     pub fn get_modoff_string_int(&self, vaddr: usize, output: &mut String) {
         output.clear();
 
-        let (modname, offset) = self.get_modoff(vaddr);
-        if let Some(modname) = modname {
-            write!(output, "{}+", modname).unwrap();
+        let (modinfo, offset) = self.get_modoff(vaddr);
+        if let Some(modinfo) = modinfo {
+            write!(output, "{}+", modinfo.name()).unwrap();
         }
         write!(output, "0x{:x}", offset).unwrap();
     }
@@ -66,12 +99,12 @@ impl ModuleList {
 /// Get a list of all modules for the current running process
 /// Currently only for user-mode applications
 /// On failure may return a 0 sized module list
-pub fn get_modlist_user(context: &WhvpContext,
+pub fn get_modlist_user<'a>(context: &WhvpContext,
         memory: &mut MemReader) -> Result<ModuleList, ()> {
     let mut ret = ModuleList::new();
 
     // Get information about the guest state
-    let cr3 = unsafe { context.cr3.Reg64 } as usize;
+    let cr3 = context.cr3() as usize;
     let lma = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
     let gs_base = unsafe { context.gs.Segment.Base } as usize;
 
@@ -105,6 +138,10 @@ pub fn get_modlist_user(context: &WhvpContext,
         let namelen = memory.read_virt_usize(cr3, flink + 0x58)? as u16 as usize;
         let nameptr = memory.read_virt_usize(cr3, flink + 0x60)?;
 
+        // Get the module information
+        let time_date_stamp = memory.read_virt_usize(cr3, flink + 0x80)? as u32;
+        let size_of_image   = memory.read_virt_usize(cr3, flink + 0x40)? as u32;
+
         // Skip this entry if it doesn't seem sane
         if nameptr == 0 || namelen == 0 || (namelen % 2) != 0 {
             if flink == blink { break; }
@@ -130,9 +167,10 @@ pub fn get_modlist_user(context: &WhvpContext,
 
         // Append this to the module list
         ret.add_module(ModuleEntry {
+            info: ModuleInfo::new(name_utf8.into(),
+                                  time_date_stamp, size_of_image),
             base,
             len,
-            name: name_utf8
         });
 
         // Go to the next module

@@ -1,68 +1,44 @@
 use std::collections::HashMap;
-
-/// Structure representing symbol information for a module
-#[derive(Serialize, Deserialize)]
-#[repr(C)]
-struct SymbolContext {
-    /// Symbols in format (offset, symbol name, size of symbol)
-    symbols: Vec<(u64, String, u64)>,
-
-    /// Source line in format ???
-    sourceline: Vec<(u64, String, u64)>,
-}
+use crate::win32::ModuleInfo;
+use crate::symdumper::{get_symbols_from_module, SymbolContext};
 
 /// Structure representing all symbols
 #[derive(Default)]
 pub struct Symbols {
     /// Symbols per module name
-    modules: HashMap<String, SymbolContext>,
+    modules: HashMap<ModuleInfo<'static>, SymbolContext>,
 }
 
 impl Symbols {
-    /// Load up all symbols from a folder "symbols" in the current directory
-    pub fn load() -> Result<Symbols, std::io::Error> {
-        let mut ret = Symbols { modules: HashMap::new() };
+    /// Load the symbols for a module `module_name` with TimeDateStamp and
+    /// SizeOfImage from their PE header
+    fn load_win32(&mut self, module: &ModuleInfo) -> Result<(), std::io::Error>{
+        // Already loaded
+        if self.modules.contains_key(module) { return Ok(()); }
 
-        // Go through each file in the folder
-        for entry in std::fs::read_dir("symbols")? {
-            let entry = entry?;
-            let path = entry.path();
-
-            // We only care about json files
-            if path.is_file() && path.to_str().unwrap().ends_with(".json") {
-                // Convert to lowercase
-                let filename = path.file_name().unwrap()
-                    .to_str().unwrap().to_lowercase();
-
-                // Get the name excluding the extension as the module name
-                let modname = &filename[..filename.len()-5];
-
-                print!("Loading symbols for file {:?} | {}\n", path, modname);
-
-                // Read the contents and parse the JSON
-                let contents = std::fs::read_to_string(&path)?;
-                let deserialized: SymbolContext =
-                    serde_json::from_str(&contents)?;
-
-                // Print symbol status
-                print!("Loaded {} symbols {} sourcelines\n",
-                    deserialized.symbols.len(),
-                    deserialized.sourceline.len());
-
-                // Insert this module listing
-                ret.modules.insert(modname.into(), deserialized);
-            }
+        if let Ok(symbols) = get_symbols_from_module(module) {
+            print!("Loaded symbols for {:x?}\n", module);
+            
+            // Update the database
+            self.modules.insert(module.deepclone(), symbols);
+        } else {
+            // Failed to download the symbols, create an empty entry in the
+            // `HashMap` so we don't keep trying to re-download
+            self.modules.insert(module.deepclone(), SymbolContext::default());
         }
 
-        Ok(ret)
+        Ok(())
     }
 
-    pub fn resolve(&self, module: &str, offset: usize) -> Option<String> {
-        // Normalize the name to lowercase so it's case insensitive
-        let module = module.to_lowercase();
+    pub fn resolve(&mut self, module: &ModuleInfo, offset: usize)
+            -> Option<String> {
+        // Attempt to load symbols for this module
+        if self.load_win32(module).is_err() {
+            return None;
+        }
 
         // Look up the module
-        if let Some(context) = self.modules.get(&module) {
+        if let Some(context) = self.modules.get(module) {
             // Look for nearest symbol
             let search = context.symbols
                 .binary_search_by_key(&offset, |x| x.0 as usize);
@@ -79,7 +55,7 @@ impl Symbols {
 
                     // Create symbol+offset
                     Some(format!("{}!{}+0x{:x}",
-                        module, context.symbols[ii].1, offset))
+                        module.name(), context.symbols[ii].1, offset))
                 }
                 Err(ii) => {
                     // Could not find direct match, `ii` is the insertion point
@@ -98,7 +74,7 @@ impl Symbols {
 
                     // Create symbol+offset
                     Some(format!("{}!{}+0x{:x}",
-                        module, context.symbols[ii-1].1, offset))
+                        module.name(), context.symbols[ii-1].1, offset))
                 }
             }
         } else {

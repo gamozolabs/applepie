@@ -1,15 +1,9 @@
-#[macro_use]
-extern crate serde_derive;
-
-extern crate serde;
-extern crate serde_json;
-
-use std::env;
-use std::fs::File;
-use std::io::Write;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::iter::once;
+use std::process::Command;
+use std::io::{Error, ErrorKind};
+use crate::win32::ModuleInfo;
 
 type HANDLE = usize;
 
@@ -173,9 +167,9 @@ impl Default for ImagehlpModule64W {
 /// Vector of (virtual address, symbol name, symbol size)
 type Context = *mut SymbolContext;
 
-extern fn srcline_callback(srcline_info: *const SrcCodeInfoW, context: Context) -> bool {
+extern fn srcline_callback(srcline_info: *const SrcCodeInfoW, context: usize) -> bool {
     let srcline = unsafe { &*srcline_info };
-    let context = unsafe { &mut *context };
+    let context = unsafe { &mut *(context as Context) };
 
     let mut filename = Vec::with_capacity(srcline.FileName.len());
     for &val in srcline.FileName.iter() {
@@ -190,9 +184,9 @@ extern fn srcline_callback(srcline_info: *const SrcCodeInfoW, context: Context) 
     true
 }
 
-extern fn sym_callback(sym_info: *const SymbolInfoW, size: u32, context: Context) -> bool {
+extern fn sym_callback(sym_info: *const SymbolInfoW, size: u32, context: usize) -> bool {
     let symbol = unsafe { &*sym_info };
-    let context = unsafe { &mut *context };
+    let context = unsafe { &mut *(context as Context) };
 
     // Technically NameLen isn't supposed to contain the null terminator... but it does.
     // Yay!
@@ -220,35 +214,33 @@ extern {
                           ModuleInfo: *mut ImagehlpModule64W) -> bool;
 
     fn SymEnumSymbolsW(hProcess: HANDLE, BaseOfDll: u64, Mask: usize,
-                      callback: extern fn(sym_info: *const SymbolInfoW, size: u32, context: Context) -> bool, 
-                      context: Context) -> bool;
+                      callback: extern fn(sym_info: *const SymbolInfoW, size: u32, context: usize) -> bool, 
+                      context: usize) -> bool;
 
     fn SymEnumSourceLinesW(hProcess: HANDLE, Base: u64, Obj: usize, File: usize, Line: u32,
-                           Flags: u32, callback: extern fn(LineInfo: *const SrcCodeInfoW, UserContext: Context) -> bool,
-                           UserContext: Context) -> bool;
+                           Flags: u32, callback: extern fn(LineInfo: *const SrcCodeInfoW, UserContext: usize) -> bool,
+                           UserContext: usize) -> bool;
+
+    fn SymUnloadModule64(hProcess: HANDLE, BaseOfDll: u64) -> bool;
+
+    fn SymCleanup(hProcess: HANDLE) -> bool;
 }
 
 pub fn win16_for_str(s: &str) -> Vec<u16> {
     OsStr::new(s).encode_wide().chain(once(0)).collect()
 }
 
-#[derive(Serialize)]
 #[repr(C)]
-struct SymbolContext {
-    symbols:    Vec<(u64, String, u64)>,
-    sourceline: Vec<(u64, String, u64)>,
+#[derive(Clone, Default)]
+pub struct SymbolContext {
+    pub symbols:    Vec<(u64, String, u64)>,
+    pub sourceline: Vec<(u64, String, u64)>,
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() != 4 {
-        print!("Usage: symdumper <PE file to dump> <output json> <symbol path>\n");
-        return;
-    }
-
+/// Get all of the symbols from a PE file `pe_file`
+pub fn get_symbols_from_file(pe_file: &str) -> SymbolContext {
     let mut symdb = SymbolContext {
-        symbols: Vec::new(),
+        symbols:    Vec::new(),
         sourceline: Vec::new(),
     };
 
@@ -258,17 +250,14 @@ fn main() {
         let cur_process = GetCurrentProcess();
 
         // Initialize the symbol library for this process
-        let sympath = win16_for_str(&args[3]);
-        assert!(SymInitializeW(cur_process, sympath.as_ptr(), false),
+        assert!(SymInitializeW(cur_process, 0 as *const _, false),
                 "Failed to SymInitializeW()");
 
         // Load up a module into the current process as the base address
         // the file specified
-        let filename = win16_for_str(&args[1]);
+        let filename = win16_for_str(pe_file);
         module_base = SymLoadModuleExW(cur_process, 0, filename.as_ptr(), std::ptr::null(), 0, 0, 0, 0);
         assert!(module_base != 0, "Failed to SymLoadModuleExW()");
-
-        print!("Loaded library to 0x{:x}\n", module_base);
 
         // Get information about the module we just loaded
         let mut module_info = ImagehlpModule64W::default();
@@ -279,24 +268,96 @@ fn main() {
         // This is pedantic but we might as well check it
         assert!(module_info.BaseOfImage == module_base);
 
-        print!("Module size {:x}\n", module_info.ImageSize);
-
-        assert!(SymEnumSymbolsW(cur_process, module_base, 0, sym_callback, &mut symdb as *mut _));
-        print!("Enumerated symbols\n");
-        if !SymEnumSourceLinesW(cur_process, module_base, 0, 0, 0, 0, srcline_callback, &mut symdb as *mut _) {
+        assert!(SymEnumSymbolsW(cur_process, module_base, 0, sym_callback, &mut symdb as *mut _ as usize));
+        if !SymEnumSourceLinesW(cur_process, module_base, 0, 0, 0, 0, srcline_callback, &mut symdb as *mut _ as usize) {
             print!("Warning: Could not enumerate sourcelines\n");
-        } else {
-            print!("Enumerated lines\n");
         }
+
+        assert!(SymUnloadModule64(cur_process, module_base),
+            "Failed to SymUnloadModule64()");
+
+        assert!(SymCleanup(cur_process), "Failed to SymCleanup()");
     }
 
     symdb.symbols.sort_by_key(|x| x.0);
-    print!("Sorted symbol info\n");
-
     symdb.sourceline.sort_by_key(|x| x.0);
-    print!("Sorted sourceline info\n");
 
-    let serialized = serde_json::to_string(&symdb).unwrap();
-    let mut fd = File::create(&args[2]).expect("Failed to create symbol file");
-    fd.write_all(serialized.as_bytes()).expect("Failed to write symbol file");
+    symdb
+}
+
+/// Get all of the symbols from a module `module_name` with a TimeDateStamp
+/// and SizeOfImage from the PE header. This will automatically download the
+/// module and PDB from the symbol store using symchk
+pub fn get_symbols_from_module<'a>(module: &ModuleInfo<'a>)
+    -> std::io::Result<SymbolContext>
+{
+    // Use symchk to download the module and symbols
+    let module = download_symbol(module.name(), module.time(), module.size())?;
+    Ok(get_symbols_from_file(&module))
+}
+
+/// Download a module and the corresponding PDB based on module_name,
+/// it's TimeDateStamp and SizeOfImage from it's PE header
+/// 
+/// Returns a string containing a filename of the downloaded module
+fn download_symbol(module_name: &str, timedatestamp: u32, sizeofimage: u32)
+        -> std::io::Result<String> {
+    let mut dir = std::env::temp_dir();
+    dir.push("applepie_manifest");
+
+    // Create manifest file for symchk
+    std::fs::write(&dir, format!("{},{:x}{:x},1\r\n",
+        module_name, timedatestamp, sizeofimage))?;
+
+    // Run symchk to download this module
+    let res = Command::new("symchk")
+        .arg("/v")
+        .arg("/im")
+        .arg(dir)
+        .output()?;
+    if !res.status.success() {
+        return Err(Error::new(ErrorKind::Other, "symchk returned with error"));
+    }
+
+    // Symchk apparently ran, check output
+    let stderr = std::str::from_utf8(&res.stderr)
+        .expect("Failed to convert symchk output to utf-8");
+
+    let mut filename = None;
+    for line in stderr.lines() {
+        const PREFIX:  &'static str = "DBGHELP: ";
+        const POSTFIX: &'static str = " - OK";
+
+        // The line that contains the filename looks like:
+        // DBGHELP: C:\symbols\calc.exe\8f598a9eb000\calc.exe - OK
+        if !line.starts_with(PREFIX) { continue; }
+        if !line.ends_with(POSTFIX) { continue; }
+
+        // We only expect one line of output to match the above criteria
+        // If there are multiple we'll need to improve this "parser"
+        assert!(filename.is_none(), "Multiple filenames in symchk output");
+
+        // Save the filename we found
+        filename = Some(&line[PREFIX.len()..line.len() - POSTFIX.len()]);
+    }
+
+    // Fail hard if we didn't get the output filename from symchk
+    let filename = filename.expect("Did not get expected symchk output");
+
+    // Run symchk to download the pdb for the file
+    let res = Command::new("symchk")
+        .arg(filename)
+        .output()?;
+    if !res.status.success() {
+        return Err(Error::new(ErrorKind::Other, "symchk returned with error"));
+    }
+
+    // Now we have downloaded the PDB for this file :)
+    Ok(filename.into())
+}
+
+#[test]
+fn test_symchk() {
+    download_symbol("calc.exe", 0x8F598A9E, 0xB000)
+        .expect("Failed to download symbol");
 }
