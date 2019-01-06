@@ -26,9 +26,9 @@ I like to have physical things for my projects:
 
 # What is this for?
 
-This is a tool designed for fuzzing and introspection during security research. By using a hypervisor common fuzzing techniques can be applied to any target, kernel or userland. This environment allows fuzzing of whole systems without a need for source of the target. At the hypervisor level code coverage can be gathered, and if needed Bochs emulation can be used to provide arbitrary introspection in an emulation environment. This coverage information can be used to figure out the effectiveness of the fuzz cases. With more coverage a fuzz case can be saved as it was an interesting case. This input can be used later, built on by new corruptions.
+This is a tool designed for fuzzing and introspection during security research. By using a hypervisor common fuzzing techniques can be applied to any target, kernel or userland. This environment allows fuzzing of whole systems without a need for source of the target. At the hypervisor level code coverage can be gathered, and if needed Bochs emulation can be used to provide arbitrary introspection in an emulation environment. This coverage information can be used to figure out the effectiveness of the fuzz cases. A fuzz case that caused an increase in coverage can be saved as it was an interesting case. This input can be used later, built on by new corruptions.
 
-Snapshot fuzzing is the primary use of this tool. Where you take a snapshot of a system in a certain state, and save it off. This snapshot can then be loaded up for fuzzing where memory is changed in it and it's resumed. Since the VM can be reset very cheaply, the VM can be reset often. If it takes Word 5 seconds to boot, but you can snapshot it right as it reads your file, you can cut the fuzz case down to only what is relevant to an input. This allows for a very tight loop of fuzzing without needing to have access to source. Since the VM's are entirely separate systems, many can be run in parallel to allow scaling to all cores.
+Snapshot fuzzing is the primary use of this tool. Where you take a snapshot of a system in a certain state, and save it off. This snapshot can then be loaded up for fuzzing, where a fuzz case is injected, and it's resumed. Since the VM can be reset very cheaply, the VM can be reset often. If it takes Word 5 seconds to boot, but you can snapshot it right as it reads your file, you can cut the fuzz case down to only what is relevant to an input. This allows for a very tight loop of fuzzing without needing to have access to source. Since the VM's are entirely separate systems, many can be run in parallel to allow scaling to all cores.
 
 Currently this tool only supports gathering code coverage, dynamic symbol downloading for Windows, and symbol/module parsing for Windows targets as well. Adding fuzzing support will be quite soon.
 
@@ -40,9 +40,9 @@ I'm aiming for end-of-January for coverage (done!), feedback, module listings (d
 
 # OS Support
 
-The main supported target is modern Windows 10. Windows targets have downloading of symbols from the symbol store. This allows for symbolic coverage in Windows targets out of the box. However the code is written in a way that Linux enlightenment can easily be added.
+The main supported target is modern Windows 10. Windows targets have downloading of symbols from the symbol store. This allows for symbolic coverage in Windows targets out of the box. However, the code is written in a way that Linux enlightenment can easily be added.
 
-Without any enlightment any OS that boots can still be fuzzed and basic coverage can be gathered.
+Without any enlightment, any OS that boots can still be fuzzed and basic coverage can be gathered.
 
 Before reporting OS support issues please validate that the issue is in the hypervisor/changes to Bochs by trying to boot your target using standard prebuilt Bochs with no hypervisor. Bochs is not commonly used and can frequently have breaking bugs for even common things like booting Linux. Especially with the rapid internal changes to CPUID/MSR usages with Spectre/Meltdown mitigations going into OSes.
 
@@ -109,9 +109,9 @@ Use the included `bochservisor_test\bochsrc.bxrc` and `bochservisor_test_real\bo
 
 # Coverage
 
-Windows targets have module list enlightenment which allows us to see the listings for all the modules in the context we are running in. With this we can convert the instruction addresses to module + offset. This module + offset helps keep coverage information between fuzz cases where ASLR state changes. It also allows for the module to be colored in a tool like IDA to visually see what code has been hit.
+Windows targets have module list enlightenment, which allows us to see the listings for all the modules in the context we are running in. With this we can convert the instruction addresses to module + offset. This module + offset helps keep coverage information between fuzz cases where ASLR state changes. It also allows for the module to be colored in a tool like IDA to visually see what code has been hit.
 
-For Windows targets symbols will be dynamically downloaded from the symbol store using your `_NT_SYMBOL_PATH` and using `symchk`. Without `symchk` in the path it will silently fail. With symbols a nice human-readable version of coverage can be saved for viewing. Further with private symbols the coverage can be converted to source:line such that source code can be colored.
+For Windows targets, symbols will be dynamically downloaded from the symbol store using your `_NT_SYMBOL_PATH` and using `symchk`. Without `symchk` in the path it will silently fail. With symbols a nice human-readable version of coverage can be saved for viewing. Further, with private symbols the coverage can be converted to source:line such that source code can be colored.
 
 # Tests
 
