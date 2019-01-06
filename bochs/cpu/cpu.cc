@@ -569,6 +569,9 @@ struct _bochs_routines routines = { 0 };
 // Cached address of the Rust routine to call instead of the normal CPU loop
 void (*bochs_cpu_loop)(struct _bochs_routines*, Bit64u) = NULL;
 
+// Cached address of the Rust code coverage callback
+void (*report_coverage)(Bit64u, int, Bit64u, Bit16u, Bit64u) = NULL;
+
 void BX_CPU_C::cpu_loop(void)
 {
 #if BX_DEBUGGER
@@ -655,6 +658,14 @@ void BX_CPU_C::cpu_loop(void)
     bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u))
       GetProcAddress(module, "bochs_cpu_loop");
     if(!bochs_cpu_loop) {
+      fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    // Lookup the address of the Rust coverage reporting routine
+    report_coverage = (void (*)(Bit64u, int, Bit64u, Bit16u, Bit64u))
+      GetProcAddress(module, "report_coverage");
+    if(!report_coverage) {
       fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
       exit(-1);
     }

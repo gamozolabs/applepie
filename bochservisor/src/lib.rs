@@ -16,7 +16,9 @@ use whvp_bindings::winhvplatform::*;
 use crate::win32::{get_modlist, find_kernel_modlist};
 use crate::symloader::Symbols;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::win32::ModuleInfo;
+use crate::win32::{ModuleList, ModuleInfo};
+use std::fs::File;
+use std::io::Write;
 
 /// Unknown module name
 const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
@@ -204,6 +206,12 @@ struct PersistState {
 
     /// Pointer to `nt!PsLoadedModuleList` global
     kernel_module_list: Option<usize>,
+
+    /// Module list cache
+    module_list_cache: ModuleList,
+
+    /// Coverage log file (contains list of new coverage)
+    coverage_log_file: Option<File>,
 }
 
 thread_local! {
@@ -380,6 +388,80 @@ fn dump_coverage(coverage: &HashMap<ModuleInfo<'static>, HashSet<usize>>) {
         print!("Module coverage: {:10}\n", named_sum);
         print!("Coverage total:  {:10}\n", sum);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
+        cs: u16, rip: usize) -> bool {
+    // Fast path, we only collect 64-bit coverage right now
+    if !lma { return false; }
+
+    // Obtain the thread local
+    PERSIST.with(|x| {
+        // Borrow the thread local
+        let mut persist = x.borrow_mut();
+
+        let mut new_coverage = false;
+
+        // Quick and dirty coverage
+        let kml = persist.kernel_module_list;
+
+        // Get the module offset for this RIP
+        let mut cached = persist.module_list_cache.get_modoff(rip);
+        if cached.0.is_none() {
+            // Module didn't resolve from the cache, rewalk the module list
+            // to check for updates
+            if let Ok(ml) = get_modlist(&mut persist.memory, cr3, lma, gs_base, cs, kml) {
+                print!("Updating module list cache\n");
+                persist.module_list_cache = ml;
+                cached = persist.module_list_cache.get_modoff(rip);
+            } else {
+                // Couldn't resolve module and couldn't update module list
+                // we can't do anything at this point
+                return false;
+            }
+        }
+
+        // Unwrap module offset
+        let (modinfo, offset) = cached;
+
+        // If we were able to resolve the module, report the coverage
+        if let Some(module) = modinfo {
+            let module = module.deepclone();
+
+            // Create a new entry for this module
+            if !persist.coverage.contains_key(&module) {
+                persist.coverage.insert(module.deepclone(), HashSet::new());
+            }
+
+            // Insert this offset into the module's coverage
+            let module_entry =
+                persist.coverage.get_mut(&module.deepclone()).unwrap();
+            if module_entry.insert(offset) {
+                // First time seeing this coverage
+                new_coverage = true;
+
+                if let Some(sym) = 
+                        persist.symbols.resolve(&module, offset) {
+                    if persist.coverage_log_file.is_none() {
+                        persist.coverage_log_file = Some(
+                            File::create("coverage.txt")
+                                .expect("Failed to open coverage output")
+                        );
+                    }
+
+                    let clf = persist.coverage_log_file.as_mut().unwrap();
+                    clf.write(format!("{}\n", sym).as_bytes())
+                        .expect("Failed to write coverage entry");
+                    clf.flush().expect("Failed to flush coverage file");
+                }
+            }
+        } else {
+            // Unknown module
+        }
+
+        new_coverage
+    })
 }
 
 /// Rust CPU loop for Bochs which uses both emulation and hypervisor for running
@@ -628,7 +710,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // If we're requesting emulation, step using Bochs
             if emulating > 0 {
                 // Emulate instructions with Bochs!
+                std::mem::drop(persist);
                 (routines.step_cpu)(emulating);
+                persist = x.borrow_mut();
 
                 // Indicate no more desire to emulate, loop again
                 emulating = 0;
@@ -664,34 +748,20 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             (routines.set_context)(&context);
 
             if true {
-                // Quick and dirty coverage
-                let kml = persist.kernel_module_list;
-                if let Ok(modlist) =
-                        get_modlist(&context, &mut persist.memory, kml) {
-                    // Get the module offset for this RIP
-                    let (modinfo, offset) =
-                        modlist.get_modoff(context.rip() as usize);
+                std::mem::drop(persist);
 
-                    if let Some(module) = modinfo {
-                        // Create a new entry for this module
-                        if !persist.coverage.contains_key(module) {
-                            persist.coverage.insert(module.deepclone(), HashSet::new());
-                        }
+                let cr3 = context.cr3() as usize;
+                let lma = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
+                let gs_base = unsafe { context.gs.Segment.Base } as usize;
+                let cs = unsafe { context.cs.Segment.Selector };
+                let rip = context.rip() as usize;
 
-                        // Insert this offset into the module's coverage
-                        let module_entry =
-                            persist.coverage.get_mut(&module.deepclone()).unwrap();
-                        if module_entry.insert(offset) {
-                            if let Some(sym) = 
-                                    persist.symbols.resolve(module, offset) {
-                                print!("{}\n", sym);
-                            }
-
-                            // First time seeing this coverage
-                            //emulating = 100;
-                        }
-                    }
+                if report_coverage(cr3, lma, gs_base, cs, rip) {
+                    // New coverage detected, step for a bit
+                    emulating = 10;
                 }
+
+                persist = x.borrow_mut();
             }
 
             // Record the exit reason frequencies

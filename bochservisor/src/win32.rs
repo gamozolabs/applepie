@@ -49,7 +49,7 @@ pub struct ModuleEntry {
 }
 
 /// Group of modules
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ModuleList {
     /// List of all modules
     modules: Vec<ModuleEntry>,
@@ -101,17 +101,12 @@ impl ModuleList {
 /// Get a list of all modules for the current running process
 /// Currently only for user-mode applications
 /// On failure may return a 0 sized module list
-fn get_modlist_user<'a>(modlist: &mut ModuleList, context: &WhvpContext,
+fn get_modlist_user<'a>(modlist: &mut ModuleList,
+        cr3: usize, lma: bool, gs_base: usize, cs: u16,
         memory: &mut MemReader) -> Result<(), ()> {
-    // Get information about the guest state
-    let cr3 = context.cr3() as usize;
-    let lma = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
-    let gs_base = unsafe { context.gs.Segment.Base } as usize;
-
     // Make sure we have a GS, we're in userspace, and we're also 64-bit
-    if !(gs_base != 0 && lma &&
-            (unsafe { context.cs.Segment.Selector } & 3) == 3) {
-        return Ok(());
+    if !(gs_base != 0 && lma && (cs & 3) == 3) {
+        return Err(());
     }
 
     // Look up the PEB from the TEB
@@ -254,13 +249,9 @@ pub fn find_kernel_modlist(context: &WhvpContext,
 /// Dump it with a debugger with:
 /// `!list -x "dt" -a "nt!_KLDR_DATA_TABLE_ENTRY" nt!PsLoadedModuleList`
 /// The type for this list is `nt!_KLDR_DATA_TABLE_ENTRY`
-fn get_modlist_kernel<'a>(modlist: &mut ModuleList, context: &WhvpContext,
+fn get_modlist_kernel<'a>(modlist: &mut ModuleList,
+        cr3: usize, lma: bool, cs: u16,
         memory: &mut MemReader, plml_ptr: usize) -> Result<(), ()> {
-    // Get information about the guest state
-    let cr3 = context.cr3() as usize;
-    let lma = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
-    let cs  = unsafe { context.cs.Segment.Selector };
-
     // Make sure we're in long mode and in ring0
     if !(lma && (cs & 3) == 0) {
         return Err(());
@@ -328,20 +319,22 @@ fn get_modlist_kernel<'a>(modlist: &mut ModuleList, context: &WhvpContext,
 }
 
 /// Walk the module list for the current operating context
-pub fn get_modlist<'a>(context: &WhvpContext, memory: &mut MemReader,
+pub fn get_modlist<'a>(memory: &mut MemReader,
+        cr3: usize, lma: bool, gs_base: usize, cs: u16,
         plml_ptr: Option<usize>) -> Result<ModuleList, ()> {
+
     // Create the module list we will return
     let mut ret = ModuleList::new();
-
-    let cs = unsafe { context.cs.Segment.Selector };
 
     // Check which CPL we're at
     if (cs & 3) == 3 {
         // ring3
-        get_modlist_user(&mut ret, context, memory)?;
+        get_modlist_user(&mut ret, cr3, lma, gs_base, cs, memory)?;
     } else if plml_ptr.is_some() {
         // kernel
-        get_modlist_kernel(&mut ret, context, memory, plml_ptr.unwrap())?;
+        get_modlist_kernel(&mut ret, cr3, lma, cs, memory, plml_ptr.unwrap())?;
+    } else {
+        return Err(());
     }
 
     Ok(ret)
