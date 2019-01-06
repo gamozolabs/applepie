@@ -68,14 +68,27 @@ impl ModuleList {
 
     /// Get the module offset representation of a virtual address
     pub fn get_modoff(&self, vaddr: usize) -> (Option<&ModuleInfo>, usize) {
-        for module in &self.modules {
-            if vaddr >= module.base &&
-                    vaddr < module.base.checked_add(module.len).unwrap() {
-                let offset = vaddr - module.base;
-                return (Some(&module.info), offset);
+        let search = self.modules
+            .binary_search_by_key(&vaddr, |x| x.base as usize);
+
+        match search {
+            Ok(ii) => {
+                // Direct match, no offset
+                return (Some(&self.modules[ii].info), 0);
             }
+            Err(ii) if ii > 0 => {
+                // Find the nearest module below this virtual address
+                let offset =
+                    vaddr.checked_sub(self.modules[ii - 1].base).unwrap();
+                if offset < self.modules[ii - 1].len {
+                    // Offset is in bounds of the module, thus we found a match
+                    return (Some(&self.modules[ii - 1].info), offset);
+                }
+            }
+            _ => {}
         }
 
+        // No match
         (None, vaddr)
     }
 
@@ -336,6 +349,9 @@ pub fn get_modlist<'a>(memory: &mut MemReader,
     } else {
         return Err(());
     }
+
+    // Sort listing so we can binary search by module base
+    ret.modules.sort_by_key(|x| x.base);
 
     Ok(ret)
 }

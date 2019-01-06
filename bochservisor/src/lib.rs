@@ -168,6 +168,16 @@ impl VmExitReason {
     }
 }
 
+/// All kinds of statistics for tracking what we're doing
+#[derive(Default, Debug)]
+struct Statistics {
+    /// Number coverage callback invocations
+    coverage_callbacks: u64,
+
+    /// Number of module list walks
+    module_list_walks: u64,
+}
+
 // Due to bochs using longjmps we must place a lot of state in this structure
 // so we don't lose it when our code suddenly gets hijacked and reenters from
 // the start
@@ -212,6 +222,9 @@ struct PersistState {
 
     /// Coverage log file (contains list of new coverage)
     coverage_log_file: Option<File>,
+
+    /// Statistics
+    stats: Statistics,
 }
 
 thread_local! {
@@ -401,6 +414,8 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
         // Borrow the thread local
         let mut persist = x.borrow_mut();
 
+        persist.stats.coverage_callbacks += 1;
+
         let mut new_coverage = false;
 
         // Quick and dirty coverage
@@ -411,8 +426,9 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
         if cached.0.is_none() {
             // Module didn't resolve from the cache, rewalk the module list
             // to check for updates
+            persist.stats.module_list_walks += 1;
             if let Ok(ml) = get_modlist(&mut persist.memory, cr3, lma, gs_base, cs, kml) {
-                print!("Updating module list cache\n");
+                //print!("Updating module list cache\n");
                 persist.module_list_cache = ml;
                 cached = persist.module_list_cache.get_modoff(rip);
             } else {
@@ -691,10 +707,13 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     persist.vm_elapsed as f64 / total_cycles as f64,
                     total_cycles as f64 / persist.tickrate.unwrap());
 
+                dump_coverage(&persist.coverage);
+
                 // Print vmexit reason frequencies
                 print!("{:#?}\n", persist.vmexits);
 
-                dump_coverage(&persist.coverage);
+                // Print statistics
+                print!("{:#?}\n", persist.stats);
 
                 // Attempt to find the nt!PsLoadedModuleList
                 if persist.kernel_module_list.is_none() {
@@ -758,7 +777,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
                 if report_coverage(cr3, lma, gs_base, cs, rip) {
                     // New coverage detected, step for a bit
-                    emulating = 10;
+                    emulating = 1000;
                 }
 
                 persist = x.borrow_mut();
