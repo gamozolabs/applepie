@@ -23,6 +23,10 @@ use std::io::Write;
 /// Unknown module name
 const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
 
+/// Disables coverage entirely if this is `true`
+/// This helps a lot with performance if you're not concerned with coverage info
+const COVERAGE_DISABLE: bool = false;
+
 // Bochs permissions used for `get_memory_backing`
 const BX_READ:    i32 = 0;
 const BX_WRITE:   i32 = 1;
@@ -406,6 +410,8 @@ fn dump_coverage(coverage: &HashMap<ModuleInfo<'static>, HashSet<usize>>) {
 #[no_mangle]
 pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
         cs: u16, rip: usize) -> bool {
+    if COVERAGE_DISABLE { return false; }
+
     // Fast path, we only collect 64-bit coverage right now
     if !lma { return false; }
 
@@ -447,7 +453,8 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
 
             // Create a new entry for this module
             if !persist.coverage.contains_key(&module) {
-                persist.coverage.insert(module.deepclone(), HashSet::new());
+                persist.coverage.insert(module.deepclone(),
+                    HashSet::with_capacity(1000000));
             }
 
             // Insert this offset into the module's coverage
@@ -777,7 +784,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
                 if report_coverage(cr3, lma, gs_base, cs, rip) {
                     // New coverage detected, step for a bit
-                    emulating = 1000;
+                    emulating += 1000;
                 }
 
                 persist = x.borrow_mut();
@@ -802,7 +809,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating = 10;
+                    emulating += 100;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
@@ -811,7 +818,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating = 10;
+                    emulating += 100;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => {
@@ -820,7 +827,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating = 10;
+                    emulating += 100;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => {
@@ -839,7 +846,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // Not sure which state is going bad here, or if it's some
                     // CPUID/MSR desync issue with Bochs
                     //print!("Warning: Invalid VP state, emulating for a bit\n");
-                    emulating = 10;
+                    emulating += 100;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
@@ -849,7 +856,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess => {
                     // Handle MSR read/writes
-                    emulating = 10;
+                    emulating += 100;
                     continue;
                 }
                 _ => {
