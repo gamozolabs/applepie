@@ -270,7 +270,9 @@ pub fn get_symbols_from_file(pe_file: &str) -> SymbolContext {
 
         assert!(SymEnumSymbolsW(cur_process, module_base, 0, sym_callback, &mut symdb as *mut _ as usize));
         if !SymEnumSourceLinesW(cur_process, module_base, 0, 0, 0, 0, srcline_callback, &mut symdb as *mut _ as usize) {
-            print!("Warning: Could not enumerate sourcelines\n");
+            // Eh just silently fail here, most people won't have private
+            // symbols so this would just spam
+            //print!("Warning: Could not enumerate sourcelines\n");
         }
 
         assert!(SymUnloadModule64(cur_process, module_base),

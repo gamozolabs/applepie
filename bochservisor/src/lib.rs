@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use whvp_bindings::winhvplatform::*;
-use crate::win32::get_modlist_user;
+use crate::win32::{get_modlist, find_kernel_modlist};
 use crate::symloader::Symbols;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::win32::ModuleInfo;
@@ -201,6 +201,9 @@ struct PersistState {
 
     /// Symbols
     symbols: Symbols,
+
+    /// Pointer to `nt!PsLoadedModuleList` global
+    kernel_module_list: Option<usize>,
 }
 
 thread_local! {
@@ -213,6 +216,19 @@ thread_local! {
 pub struct MemReader {
     /// List of all of the memory regions mapped into the guest physical space
     regions: Vec<MemoryRegion>
+}
+
+macro_rules! read_virt_declare {
+    ($name:ident, $vt:ty) => (
+        pub fn $name(&mut self, cr3: usize, addr: usize) -> Result<$vt, ()> {
+            let mut val = [0u8; std::mem::size_of::<$vt>()];
+            if self.read_virt(cr3, addr, &mut val) == val.len() {
+                Ok(<($vt)>::from_ne_bytes(val))
+            } else {
+                Err(())
+            }
+        }
+    )
 }
 
 impl MemReader {
@@ -314,16 +330,11 @@ impl MemReader {
         buf.len()
     }
 
-    /// Read a usize from `vaddr` in page table `cr3`. Panics on error.
-    pub fn read_virt_usize(&mut self, cr3: usize,
-            addr: usize) -> Result<usize, ()> {
-        let mut val = [0u8; 8];
-        if self.read_virt(cr3, addr, &mut val) == val.len() {
-            Ok(usize::from_le_bytes(val))
-        } else {
-            Err(())
-        }
-    }
+    read_virt_declare!(read_virt_u8, u8);
+    read_virt_declare!(read_virt_u16, u16);
+    read_virt_declare!(read_virt_u32, u32);
+    read_virt_declare!(read_virt_u64, u64);
+    read_virt_declare!(read_virt_usize, usize);
 }
 
 impl virtmem::PhysMem for MemReader {
@@ -336,7 +347,7 @@ impl virtmem::PhysMem for MemReader {
         if self.read_phys(addr as usize, &mut buf) != buf.len() {
             return Err("Failed to read physical memory");
         }
-        Ok(u64::from_le_bytes(buf))
+        Ok(u64::from_ne_bytes(buf))
     }
 
     fn write_phys(&mut self, _addr: *mut u64,
@@ -531,14 +542,6 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Save the hypervisor into the persitent storage
             persist.hypervisor = Some(new_hyp);
 
-            /*
-            // Load symbols from disk
-            if let Ok(symbols) = Symbols::load() {
-                persist.symbols = symbols;
-            } else {
-                print!("Warning: Failed to load symbols\n");
-            }*/
-
             // Create a memory accessor
             persist.memory = MemReader::new(mem_regions);
 
@@ -611,6 +614,12 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
                 dump_coverage(&persist.coverage);
 
+                // Attempt to find the nt!PsLoadedModuleList
+                if persist.kernel_module_list.is_none() {
+                    persist.kernel_module_list =
+                        find_kernel_modlist(&context, &mut persist.memory).ok();
+                }
+
                 // Update the next report time
                 persist.future_report = time::rdtsc() +
                     persist.tickrate.unwrap() as u64;
@@ -656,8 +665,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
             if true {
                 // Quick and dirty coverage
+                let kml = persist.kernel_module_list;
                 if let Ok(modlist) =
-                        get_modlist_user(&context, &mut persist.memory) {
+                        get_modlist(&context, &mut persist.memory, kml) {
                     // Get the module offset for this RIP
                     let (modinfo, offset) =
                         modlist.get_modoff(context.rip() as usize);

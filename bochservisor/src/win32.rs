@@ -36,6 +36,7 @@ impl<'a> ModuleInfo<'a> {
 }
 
 /// Module entry
+#[derive(Debug)]
 pub struct ModuleEntry {
     /// Info to uniquely identify this module
     info: ModuleInfo<'static>,
@@ -48,6 +49,7 @@ pub struct ModuleEntry {
 }
 
 /// Group of modules
+#[derive(Debug)]
 pub struct ModuleList {
     /// List of all modules
     modules: Vec<ModuleEntry>,
@@ -99,10 +101,8 @@ impl ModuleList {
 /// Get a list of all modules for the current running process
 /// Currently only for user-mode applications
 /// On failure may return a 0 sized module list
-pub fn get_modlist_user<'a>(context: &WhvpContext,
-        memory: &mut MemReader) -> Result<ModuleList, ()> {
-    let mut ret = ModuleList::new();
-
+fn get_modlist_user<'a>(modlist: &mut ModuleList, context: &WhvpContext,
+        memory: &mut MemReader) -> Result<(), ()> {
     // Get information about the guest state
     let cr3 = context.cr3() as usize;
     let lma = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
@@ -111,7 +111,7 @@ pub fn get_modlist_user<'a>(context: &WhvpContext,
     // Make sure we have a GS, we're in userspace, and we're also 64-bit
     if !(gs_base != 0 && lma &&
             (unsafe { context.cs.Segment.Selector } & 3) == 3) {
-        return Ok(ret);
+        return Ok(());
     }
 
     // Look up the PEB from the TEB
@@ -132,15 +132,15 @@ pub fn get_modlist_user<'a>(context: &WhvpContext,
     while flink != 0 {
         // Get base and length
         let base = memory.read_virt_usize(cr3, flink + 0x30)?;
-        let len  = memory.read_virt_usize(cr3, flink + 0x40)? as u32 as usize;
+        let len  = memory.read_virt_u32(cr3, flink + 0x40)? as usize;
 
         // Get the name length and pointer
-        let namelen = memory.read_virt_usize(cr3, flink + 0x58)? as u16 as usize;
+        let namelen = memory.read_virt_u16(cr3, flink + 0x58)? as usize;
         let nameptr = memory.read_virt_usize(cr3, flink + 0x60)?;
 
         // Get the module information
-        let time_date_stamp = memory.read_virt_usize(cr3, flink + 0x80)? as u32;
-        let size_of_image   = memory.read_virt_usize(cr3, flink + 0x40)? as u32;
+        let time_date_stamp = memory.read_virt_u32(cr3, flink + 0x80)?;
+        let size_of_image   = memory.read_virt_u32(cr3, flink + 0x40)?;
 
         // Skip this entry if it doesn't seem sane
         if nameptr == 0 || namelen == 0 || (namelen % 2) != 0 {
@@ -166,7 +166,7 @@ pub fn get_modlist_user<'a>(context: &WhvpContext,
         }).expect("Failed to convert to utf8");
 
         // Append this to the module list
-        ret.add_module(ModuleEntry {
+        modlist.add_module(ModuleEntry {
             info: ModuleInfo::new(name_utf8.into(),
                                   time_date_stamp, size_of_image),
             base,
@@ -176,6 +176,172 @@ pub fn get_modlist_user<'a>(context: &WhvpContext,
         // Go to the next module
         if flink == blink { break; }
         flink = memory.read_virt_usize(cr3, flink)?;
+    }
+
+    Ok(())
+}
+
+// Find the address of the `nt!PsLoadedModuleList` global
+pub fn find_kernel_modlist(context: &WhvpContext,
+        memory: &mut MemReader) -> Result<usize, ()> {
+    // Get information about the guest state
+    let cr3       = context.cr3() as usize;
+    let lma       = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
+    let kernel_gs = unsafe { context.gs.Segment.Base as usize };
+    let cs        = unsafe { context.cs.Segment.Selector };
+
+    // Make sure we have a GS, and we're also 64-bit and in kernel mode
+    if !(lma && (cs & 3) == 0 && (kernel_gs & (1 << 63)) != 0) {
+        return Err(());
+    }
+
+    // Search virtual memory in the kernel starting at GS_BASE for 64 MiB.
+    // We search for something that looks like nt!PsLoadedModuleList which
+    // contains entries of type nt!_KLDR_DATA_TABLE_ENTRY
+    //
+    // The first entry in the list should always be 'ntoskrnl.exe' so we
+    // search for that
+    let mut found: Option<usize> = None;
+
+    // Walk through memory
+    for offset in (0..64 * 1024 * 1024).step_by(8) {
+        let list_addr = kernel_gs + offset;
+
+        // Attempt to read a pointer from this location
+        if let Ok(flink) = memory.read_virt_usize(cr3, list_addr) {
+            // _KLDR_DATA_TABLE_ENTRY.InLoadOrderLinks.Blink
+            let blink = memory.read_virt_usize(cr3, flink + 0x08);
+
+            // If the blink pointer doesn't reference the base of the list this
+            // cannot be the module list
+            if blink != Ok(list_addr) { continue; }
+
+            // _KLDR_DATA_TABLE_ENTRY.BaseDllName.Length
+            let size = memory.read_virt_u16(cr3, flink + 0x58);
+
+            // _KLDR_DATA_TABLE_ENTRY.BaseDllName.Buffer
+            let nameptr = memory.read_virt_usize(cr3, flink + 0x60);
+
+            // Make sure the length is 0x18 and all reads succeeded
+            if let (Ok(0x18), Ok(nameptr)) = (size, nameptr) {
+                // Make room to read the name
+                let mut buf = [0u8; 0x18];
+
+                // Read the name
+                if memory.read_virt(cr3, nameptr, &mut buf) == 0x18 {
+                    // If it's UTF-16 'ntoskrnl.exe' then we found
+                    // our list!
+                    if &buf == b"n\0t\0o\0s\0k\0r\0n\0l\0.\0e\0x\0e\0" {
+                        found = Some(list_addr);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(kml) = found {
+        print!("Found nt!PsLoadedModuleList at 0x{:x}\n", kml);
+    }
+    
+    found.ok_or(())
+}
+
+/// Walk the kernel module list. The `modlist` parameter should be obtained
+/// from a successful call to `find_kernel_modlist`
+/// 
+/// Kernel list is at a global nt!PsLoadedModuleList
+/// Dump it with a debugger with:
+/// `!list -x "dt" -a "nt!_KLDR_DATA_TABLE_ENTRY" nt!PsLoadedModuleList`
+/// The type for this list is `nt!_KLDR_DATA_TABLE_ENTRY`
+fn get_modlist_kernel<'a>(modlist: &mut ModuleList, context: &WhvpContext,
+        memory: &mut MemReader, plml_ptr: usize) -> Result<(), ()> {
+    // Get information about the guest state
+    let cr3 = context.cr3() as usize;
+    let lma = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
+    let cs  = unsafe { context.cs.Segment.Selector };
+
+    // Make sure we're in long mode and in ring0
+    if !(lma && (cs & 3) == 0) {
+        return Err(());
+    }
+
+    // Get the first pointer to the InLoadOrderModuleList
+    // This type is of _KLDR_DATA_TABLE_ENTRY
+    let mut flink = memory.read_virt_usize(cr3, plml_ptr)?;
+    let blink     = memory.read_virt_usize(cr3, plml_ptr + 0x8)?;
+
+    // This should never happen
+    assert!(blink != 0, "No blink");
+
+    // Loop while we have entries in the list
+    while flink != 0 {
+        // Get base and length
+        let base = memory.read_virt_usize(cr3, flink + 0x30)?;
+        let len  = memory.read_virt_u32(cr3, flink + 0x40)? as usize;
+
+        // Get the name length and pointer
+        let namelen = memory.read_virt_u16(cr3, flink + 0x58)? as usize;
+        let nameptr = memory.read_virt_usize(cr3, flink + 0x60)?;
+
+        // Get the module information
+        let time_date_stamp = memory.read_virt_u32(cr3, flink + 0x9c)?;
+        let size_of_image   = memory.read_virt_u32(cr3, flink + 0x40)?;
+
+        // Skip this entry if it doesn't seem sane
+        if nameptr == 0 || namelen == 0 || (namelen % 2) != 0 {
+            if flink == blink { break; }
+            flink = memory.read_virt_usize(cr3, flink)?;
+            continue;
+        }
+
+        // Make room and read the UTF-16 name
+        let mut name = vec![0u8; namelen];
+        if memory.read_virt(cr3, nameptr, &mut name) != namelen {
+            // Name might be paged out, skip entry
+            if flink == blink { break; }
+            flink = memory.read_virt_usize(cr3, flink)?;
+            continue;
+        }
+
+        // Convert the module name into a UTF-8 Rust string
+        let name_utf8 = String::from_utf16(unsafe {
+            std::slice::from_raw_parts(
+                name.as_ptr() as *const u16,
+                name.len() / 2)
+        }).expect("Failed to convert to utf8");
+
+        // Append this to the module list
+        modlist.add_module(ModuleEntry {
+            info: ModuleInfo::new(name_utf8.into(),
+                                  time_date_stamp, size_of_image),
+            base,
+            len,
+        });
+
+        // Go to the next module
+        if flink == blink { break; }
+        flink = memory.read_virt_usize(cr3, flink)?;
+    }
+
+    Ok(())
+}
+
+/// Walk the module list for the current operating context
+pub fn get_modlist<'a>(context: &WhvpContext, memory: &mut MemReader,
+        plml_ptr: Option<usize>) -> Result<ModuleList, ()> {
+    // Create the module list we will return
+    let mut ret = ModuleList::new();
+
+    let cs = unsafe { context.cs.Segment.Selector };
+
+    // Check which CPL we're at
+    if (cs & 3) == 3 {
+        // ring3
+        get_modlist_user(&mut ret, context, memory)?;
+    } else if plml_ptr.is_some() {
+        // kernel
+        get_modlist_kernel(&mut ret, context, memory, plml_ptr.unwrap())?;
     }
 
     Ok(ret)

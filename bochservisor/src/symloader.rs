@@ -18,7 +18,7 @@ impl Symbols {
 
         if let Ok(symbols) = get_symbols_from_module(module) {
             print!("Loaded symbols for {:x?}\n", module);
-            
+
             // Update the database
             self.modules.insert(module.deepclone(), symbols);
         } else {
@@ -30,6 +30,7 @@ impl Symbols {
         Ok(())
     }
 
+    /// Lookup a symbol based on a module and offset
     pub fn resolve(&mut self, module: &ModuleInfo, offset: usize)
             -> Option<String> {
         // Attempt to load symbols for this module
