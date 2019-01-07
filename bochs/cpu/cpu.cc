@@ -185,14 +185,29 @@ void* get_memory_backing(Bit64u address, int type) {
   return (void*)BX_CPU_THIS_PTR getHostMemAddr(address, type);
 }
 
+// Number of hypervisor context switches. This is used to track the age of
+// icache entries. Allowing us to lazily invalidate icache entries by changing
+// the number of context switches. We only use icache entries that have an age
+// equal to this number. On switches from the hypervisor this number gets
+// incremented, causing these old icache entries to no longer be used.
+// This number starts as a "random" 64-bit value, such that if we miss a place
+// to update the icache->age field, it will fail closed, resulting in the
+// icache entry not being used and the instruction being re-decoded.
+Bit64u hypervisor_context_switches = 0x12ad1fef77be846aULL;
+
 // set_context implementation that allows Rust to provide a new CPU context for
 // Bochs to use internally
 void set_context(const struct _whvp_context* context) {
+  // Update number of context switches, this will cause icache entires to be
+  // flushed conditionally if they are older than this number
+  hypervisor_context_switches++;
+
   RAX = context->rax.Reg64;
   RCX = context->rcx.Reg64;
   RDX = context->rdx.Reg64;
   RBX = context->rbx.Reg64;
   RSP = context->rsp.Reg64;
+  BX_CPU_THIS_PTR prev_rsp = context->rsp.Reg64;
   RBP = context->rbp.Reg64;
   RSI = context->rsi.Reg64;
   RDI = context->rdi.Reg64;
@@ -205,6 +220,7 @@ void set_context(const struct _whvp_context* context) {
   R14 = context->r14.Reg64;
   R15 = context->r15.Reg64;
   RIP = context->rip.Reg64;
+  BX_CPU_THIS_PTR prev_rip = context->rip.Reg64;
   BX_CPU_THIS_PTR setEFlags(context->rflags.Reg32);
 
   SET_SEGMENT_FULL(es, BX_CPU_THIS_PTR sregs[BX_SEG_REG_ES]);
@@ -305,6 +321,9 @@ void set_context(const struct _whvp_context* context) {
   // The next few lines are taken from the mov cr0 implementation and attempt
   // to make sure Bochs updates internal state depending on if mode changes
   // occured from the newly commit register state
+
+  // Flush TLBs, this also resets stack and prefetch cache
+  BX_CPU_THIS_PTR TLB_flush();
 
 #if BX_CPU_LEVEL >= 4
   BX_CPU_THIS_PTR handleAlignmentCheck(/* CR0.AC reloaded */);
@@ -457,9 +476,6 @@ void get_context(struct _whvp_context* context) {
 // This code is nearly directly copied and pasted from the actual Bochs CPU
 // loop
 void step_cpu(Bit64u steps) {
-  // Flush data TLBs, this might not be needed but we do it anyways
-  BX_CPU_THIS_PTR TLB_flush();
-
   // Step while we have steps... duh
   while(steps) {
     // Completed a step
@@ -529,9 +545,6 @@ void step_cpu(Bit64u steps) {
     // clear stop trace magic indication that probably was set by repeat or branch32/64
     BX_CPU_THIS_PTR async_event &= ~BX_ASYNC_EVENT_STOP_TRACE;
   }
-
-  // Flush TLBs again, once again, might not be needed
-  BX_CPU_THIS_PTR TLB_flush();
 }
 
 // step_device() implementation. This steps the device and time emulation in
@@ -613,12 +626,6 @@ void BX_CPU_C::cpu_loop(void)
     Bit64u ips = SIM->get_param_num(BXPN_IPS)->get();
     if(ips != 1000000) {
       fprintf(stderr, "Bochservisor requires ips=1000000 in your bochsrc!\n");
-      exit(-1);
-    }
-
-    unsigned cpu_model = SIM->get_param_enum(BXPN_CPU_MODEL)->get();
-    if(!cpu_model || strcmp(SIM->get_param_enum(BXPN_CPU_MODEL)->get_selected(), "corei7_skylake_x")) {
-      fprintf(stderr, "Bochservisor requires corei7_skylake_x cpu model!\n");
       exit(-1);
     }
 
@@ -817,7 +824,7 @@ bxICacheEntry_c* BX_CPU_C::getICacheEntry(void)
   INC_ICACHE_STAT(iCacheLookups);
 
   bx_phy_address pAddr = BX_CPU_THIS_PTR pAddrFetchPage + eipBiased;
-  bxICacheEntry_c *entry = NULL; //BX_CPU_THIS_PTR iCache.find_entry(pAddr, BX_CPU_THIS_PTR fetchModeMask);
+  bxICacheEntry_c *entry = BX_CPU_THIS_PTR iCache.find_entry(pAddr, BX_CPU_THIS_PTR fetchModeMask);
 
   if (entry == NULL)
   {

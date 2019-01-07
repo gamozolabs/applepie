@@ -2,9 +2,9 @@
 plugin_ctrl: unmapped=true, biosdev=true, speaker=true, extfpuirq=true, parallel=true, serial=true, gameport=true
 config_interface: win32config
 display_library: win32
-memory: host=2048, guest=1024
-romimage: file="C:\dev\bochs\bochs\bios/BIOS-bochs-latest", address=0x00000000, options="fastboot"
-vgaromimage: file="C:\dev\bochs\bochs\bios/VGABIOS-lgpl-latest"
+memory: host=1024, guest=1024
+romimage: file="..\bochs\bios\BIOS-bochs-latest", address=0x0, options=none
+vgaromimage: file="..\bochs\bios\VGABIOS-lgpl-latest"
 boot: cdrom
 floppy_bootsig_check: disabled=0
 # no floppya
@@ -27,7 +27,11 @@ optramimage3: file=none
 optramimage4: file=none
 pci: enabled=1, chipset=i440fx
 vga: extension=vbe, update_freq=60, realtime=1
-cpu: count=1, ips=1000000, model=corei7_skylake_x, reset_on_triple_fault=1, cpuid_limit_winnt=0, ignore_bad_msrs=1, mwait_is_nop=0, msrs="msrs.def"
+cpu: count=1, ips=1000000, model=bx_generic, reset_on_triple_fault=0, cpuid_limit_winnt=0, ignore_bad_msrs=1, mwait_is_nop=0
+cpuid: level=6, stepping=3, model=3, family=6, vendor_string="AuthenticAMD", brand_string="AMD Athlon(tm) processor"
+cpuid: mmx=1, apic=xapic, simd=sse2, sse4a=0, misaligned_sse=0, sep=1, movbe=0, adx=0
+cpuid: aes=0, sha=0, xsave=0, xsaveopt=0
+cpuid: x86_64=1, 1g_pages=0, pcid=0, fsgsbase=0, smep=0, smap=0, mwait=1, vmx=0
 print_timestamps: enabled=0
 port_e9_hack: enabled=0
 private_colormap: enabled=0

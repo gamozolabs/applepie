@@ -732,7 +732,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 persist.future_report = time::rdtsc() +
                     persist.tickrate.unwrap() as u64;
             }
-            
+
             // If we're requesting emulation, step using Bochs
             if emulating > 0 {
                 // Emulate instructions with Bochs!
@@ -773,7 +773,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             context = persist.hypervisor.as_mut().unwrap().get_context();
             (routines.set_context)(&context);
 
-            if true {
+            if !COVERAGE_DISABLE {
                 std::mem::drop(persist);
 
                 let cr3 = context.cr3() as usize;
@@ -799,7 +799,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             }
 
             // Update frequency
-            *persist.vmexits.get_mut(&vmer).unwrap() += 1;   
+            *persist.vmexits.get_mut(&vmer).unwrap() += 1;
 
             // Determine the reason the hypervisor exited
             match vmexit.ExitReason {
@@ -846,6 +846,10 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // Not sure which state is going bad here, or if it's some
                     // CPUID/MSR desync issue with Bochs
                     //print!("Warning: Invalid VP state, emulating for a bit\n");
+                    emulating += 100;
+                    continue;
+                }
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid => {
                     emulating += 100;
                     continue;
                 }

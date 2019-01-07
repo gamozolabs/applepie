@@ -5,3 +5,7 @@ symbols
 *.log
 windows
 parse.py
+boot
+testing.py*
+.*.un~
+boot.wim

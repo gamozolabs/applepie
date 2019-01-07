@@ -732,7 +732,7 @@ void bx_generic_cpuid_t::init_cpu_extensions_bitmask(void)
     }
 
     enable_cpu_extension(BX_ISA_LONG_MODE);
-    enable_cpu_extension(BX_ISA_FFXSR);
+    //enable_cpu_extension(BX_ISA_FFXSR);
     enable_cpu_extension(BX_ISA_NX);
 
     enable_cpu_extension(BX_ISA_CMPXCHG16B);
@@ -1269,8 +1269,8 @@ Bit32u bx_generic_cpuid_t::get_std2_cpuid_features(void) const
       features |= BX_CPUID_STD2_RDTSCP;
     if (BX_CPUID_SUPPORT_ISA_EXTENSION(BX_ISA_NX))
       features |= BX_CPUID_STD2_NX;
-    if (BX_CPUID_SUPPORT_ISA_EXTENSION(BX_ISA_FFXSR))
-      features |= BX_CPUID_STD2_FFXSR;
+    /*if (BX_CPUID_SUPPORT_ISA_EXTENSION(BX_ISA_FFXSR))
+      features |= BX_CPUID_STD2_FFXSR;*/
     if (BX_CPUID_SUPPORT_ISA_EXTENSION(BX_ISA_1G_PAGES))
       features |= BX_CPUID_STD2_1G_PAGES;
 

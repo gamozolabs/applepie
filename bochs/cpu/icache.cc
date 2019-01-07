@@ -77,6 +77,9 @@ void genDummyICacheEntry(bxInstruction_c *i)
 
 bxICacheEntry_c* BX_CPU_C::serveICacheMiss(Bit32u eipBiased, bx_phy_address pAddr)
 {
+  // BOCHSERVISOR: Global in cpu.cc
+  extern Bit64u hypervisor_context_switches;
+
   bxICacheEntry_c *entry = BX_CPU_THIS_PTR iCache.get_entry(pAddr, BX_CPU_THIS_PTR fetchModeMask);
 
   BX_CPU_THIS_PTR iCache.alloc_trace(entry);
@@ -85,6 +88,9 @@ bxICacheEntry_c* BX_CPU_C::serveICacheMiss(Bit32u eipBiased, bx_phy_address pAdd
   // trace from incoming instruction bytes stream !
   entry->pAddr = pAddr;
   entry->traceMask = 0;
+
+  // BOCHSERVISOR: Update the age of this icache entry
+  entry->age = hypervisor_context_switches;
 
   unsigned remainingInPage = BX_CPU_THIS_PTR eipPageWindowSize - eipBiased;
   const Bit8u *fetchPtr = BX_CPU_THIS_PTR eipFetchPtr + eipBiased;

@@ -109,6 +109,10 @@ struct bxICacheEntry_c
   bx_phy_address pAddr; // Physical address of the instruction
   Bit32u traceMask;
 
+  Bit64u age; // BOCHSERVISOR: This age tracks hypervisor_context_switches
+              // to see if hypervisor execution has occurred since this entry
+              // was created. If it has, then we flush this cache entry on use.
+
   Bit32u tlen;          // Trace length in instructions
   bxInstruction_c *i;
 };
@@ -191,9 +195,16 @@ public:
 
   BX_CPP_INLINE bxICacheEntry_c* find_entry(bx_phy_address pAddr, unsigned fetchModeMask)
   {
+    // BOCHSERVISOR: Global in cpu.cc
+    extern Bit64u hypervisor_context_switches;
+
     bxICacheEntry_c* e = get_entry(pAddr, fetchModeMask);
     if (e->pAddr != pAddr)
        return NULL;
+
+    // BOCHSERVISOR: Return NULL on stale icache entry
+    if (e->age != hypervisor_context_switches)
+      return NULL;
 
     return e;
   }

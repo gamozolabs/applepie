@@ -93,23 +93,6 @@ void BX_CPP_AttrRegparmN(1) BX_CPU_C::PREFETCH(bxInstruction_c *i)
 
 void BX_CPP_AttrRegparmN(1) BX_CPU_C::CPUID(bxInstruction_c *i)
 {
-  Bit64u laddr = RIP + BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS].cache.u.segment.base;
-
-  // BOCHSERVISOR
-  // Terminate so we handle in the hypervisor
-  // There are some CPUIDs called in the BIOS that we cannot run in the
-  // hypervisor and this is a hack because I don't dump CPUID tables.
-  if(laddr < 0xc0000 || laddr >= 0x100000 ) {
-    // Undo that this instruction executed. Bochs updates RIP prior to calling
-    // this callback so we need to do this.
-    RIP -= i->ilen();
-
-    printf("BYPASSING CPUID\n");
-    longjmp(BX_CPU_THIS_PTR jmp_buf_env, 1);
-  }
-
-  printf("WARNING: EMULATED CPUID\n");
-
 #if BX_CPU_LEVEL >= 4
 
 #if BX_SUPPORT_VMX
