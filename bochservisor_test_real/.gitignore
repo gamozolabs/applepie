@@ -1,11 +1,5 @@
-*.txt
-*.iso
-*.vhd
-symbols
-*.log
-windows
-parse.py
-boot
-testing.py*
-.*.un~
-boot.wim
+*
+
+!.gitignore
+!bochsrc.bxrc
+!run.bat

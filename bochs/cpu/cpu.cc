@@ -629,6 +629,14 @@ void BX_CPU_C::cpu_loop(void)
       exit(-1);
     }
 
+    // Make sure we're using a Skylake. This is designed to be a superset of
+    // whatever our hypervisor reports for CPUID.
+    unsigned cpu_model = SIM->get_param_enum(BXPN_CPU_MODEL)->get();
+    if(!cpu_model || strcmp(SIM->get_param_enum(BXPN_CPU_MODEL)->get_selected(), "corei7_skylake_x")) {
+      fprintf(stderr, "Bochservisor requires corei7_skylake_x cpu model!\n");
+      exit(-1);
+    }
+
     // We only support single core right now, enforce that
     Bit64u procs   = SIM->get_param_num(BXPN_CPU_NPROCESSORS)->get();
     Bit64u cores   = SIM->get_param_num(BXPN_CPU_NCORES)->get();

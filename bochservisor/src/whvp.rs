@@ -451,12 +451,23 @@ impl Whvp {
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 
+        // _HV_X64_INTERRUPT_CONTROLLER_STATE
+        // APIC emulation
+        /*
+        let apic_mode = WHV_X64_LOCAL_APIC_EMULATION_MODE_WHvX64LocalApicEmulationModeXApic;
+        let res = unsafe { WHvSetPartitionProperty(partition,
+            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeLocalApicEmulationMode,
+            &apic_mode as *const i32 as *const c_void,
+            std::mem::size_of_val(&apic_mode) as u32)
+        };
+        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);*/
+
         // Enable vmexits on certain events
         let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
         unsafe {
             vmexits.__bindgen_anon_1.set_ExceptionExit(0);
             vmexits.__bindgen_anon_1.set_X64MsrExit(1);
-            vmexits.__bindgen_anon_1.set_X64CpuidExit(1);
+            vmexits.__bindgen_anon_1.set_X64CpuidExit(0);
         }
         let res = unsafe { WHvSetPartitionProperty(partition,
             WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExtendedVmExits,

@@ -23,6 +23,9 @@ use std::io::Write;
 /// Unknown module name
 const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
 
+/// Number of instructions to step in emulation mode after a vmexit
+const EMULATE_STEPS: u64 = 100;
+
 /// Disables coverage entirely if this is `true`
 /// This helps a lot with performance if you're not concerned with coverage info
 const COVERAGE_DISABLE: bool = false;
@@ -804,12 +807,16 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             // Determine the reason the hypervisor exited
             match vmexit.ExitReason {
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonMemoryAccess => {
+                    /*let ma = unsafe { &vmexit.__bindgen_anon_1.MemoryAccess };
+                    print!("Mem access GVA {:x} GPA {:x} RIP {:x}\n",
+                        ma.Gva, ma.Gpa, context.rip());*/
+
                     // Emulate MMIO by emulating using Bochs for a bit
                     // Note this is tunable but 100 seems to by far be the best
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating += 100;
+                    emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
@@ -818,7 +825,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating += 100;
+                    emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => {
@@ -827,7 +834,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating += 100;
+                    emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => {
@@ -846,11 +853,11 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // Not sure which state is going bad here, or if it's some
                     // CPUID/MSR desync issue with Bochs
                     //print!("Warning: Invalid VP state, emulating for a bit\n");
-                    emulating += 100;
+                    emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid => {
-                    emulating += 100;
+                    emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
@@ -860,7 +867,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess => {
                     // Handle MSR read/writes
-                    emulating += 100;
+                    emulating += EMULATE_STEPS;
                     continue;
                 }
                 _ => {
