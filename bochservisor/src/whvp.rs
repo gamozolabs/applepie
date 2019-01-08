@@ -17,6 +17,41 @@ pub const PERM_WRITE:   i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagWrite;
 pub const PERM_EXECUTE: i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagExecute;
 pub const PERM_DIRTY:   i32 = WHV_MAP_GPA_RANGE_FLAGS_WHvMapGpaRangeFlagTrackDirtyPages;
 
+/// Get the identifier for this processor
+fn get_cpu_string() -> String {
+    let mut buf = [0u8; 48];
+
+    unsafe {
+        asm!(r#"
+
+            mov eax, 0x80000002
+            cpuid
+            mov [$0 + 0*4], eax
+            mov [$0 + 1*4], ebx
+            mov [$0 + 2*4], ecx
+            mov [$0 + 3*4], edx
+
+            mov eax, 0x80000003
+            cpuid
+            mov [$0 + 4*4], eax
+            mov [$0 + 5*4], ebx
+            mov [$0 + 6*4], ecx
+            mov [$0 + 7*4], edx
+
+            mov eax, 0x80000004
+            cpuid
+            mov [$0 +  8*4], eax
+            mov [$0 +  9*4], ebx
+            mov [$0 + 10*4], ecx
+            mov [$0 + 11*4], edx
+
+        "# :: "r"(buf.as_mut_ptr() as usize) :
+        "cc", "memory", "rax", "rbx", "rcx", "rdx" : "volatile", "intel");
+    }
+
+    String::from_utf8_lossy(&buf).into()
+}
+
 /// Entire context name list for a processor using all possible fields WHVP
 /// allows access to
 /// 
@@ -61,7 +96,6 @@ const WHVP_CONTEXT_NAMES: &[i32] = &[
     WHV_REGISTER_NAME_WHvX64RegisterDr3,
     WHV_REGISTER_NAME_WHvX64RegisterDr6,
     WHV_REGISTER_NAME_WHvX64RegisterDr7,
-    WHV_REGISTER_NAME_WHvX64RegisterXCr0,
     WHV_REGISTER_NAME_WHvX64RegisterXmm0,
     WHV_REGISTER_NAME_WHvX64RegisterXmm1,
     WHV_REGISTER_NAME_WHvX64RegisterXmm2,
@@ -110,6 +144,7 @@ const WHVP_CONTEXT_NAMES: &[i32] = &[
     //WHV_REGISTER_NAME_WHvRegisterPendingEvent,
     //WHV_REGISTER_NAME_WHvX64RegisterDeliverabilityNotifications,
     //WHV_REGISTER_NAME_WHvRegisterInternalActivityState,
+    WHV_REGISTER_NAME_WHvX64RegisterXCr0,
 ];
 
 /// Entire context structure for a processor using all possible fields WHVP
@@ -167,8 +202,6 @@ pub struct WhvpContext {
     pub dr6: WHV_REGISTER_VALUE,
     pub dr7: WHV_REGISTER_VALUE,
 
-    pub xcr0: WHV_REGISTER_VALUE,
-
     pub xmm0: WHV_REGISTER_VALUE,
     pub xmm1: WHV_REGISTER_VALUE,
     pub xmm2: WHV_REGISTER_VALUE,
@@ -221,6 +254,8 @@ pub struct WhvpContext {
     //pub pending_event: WHV_REGISTER_VALUE,
     //pub deliverability_notifications: WHV_REGISTER_VALUE,
     //pub internal_activity_state: WHV_REGISTER_VALUE, unknown type
+
+    pub xcr0: WHV_REGISTER_VALUE,
 }
 
 impl WhvpContext {
@@ -589,9 +624,16 @@ impl Whvp {
         let res = unsafe { WHvSetVirtualProcessorRegisters(self.partition, 0,
             WHVP_CONTEXT_NAMES.as_ptr(), WHVP_CONTEXT_NAMES.len() as u32,
             context as *const WhvpContext as *const WHV_REGISTER_VALUE) };
-        assert!(res == 0,
-            "WHvSetVirtualProcessorRegisters() error: {:#x}\n{}",
-            res, context);
+
+        if res != 0 {
+            print!("Likely unsupported virtual processor register\n");
+            print!("Please open a ticket with your CPU string:\n");
+            print!("    CPU string: \"{}\"\n", get_cpu_string());
+
+            assert!(res == 0,
+                "WHvSetVirtualProcessorRegisters() error: {:#x}\n{}",
+                res, context);
+        }
     }
 
     // Clear a pending exception

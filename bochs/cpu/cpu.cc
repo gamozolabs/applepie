@@ -78,8 +78,6 @@ struct _whvp_context {
   WHV_REGISTER_VALUE dr6;
   WHV_REGISTER_VALUE dr7;
 
-  WHV_REGISTER_VALUE xcr0;
-
   WHV_REGISTER_VALUE xmm0;
   WHV_REGISTER_VALUE xmm1;
   WHV_REGISTER_VALUE xmm2;
@@ -132,6 +130,8 @@ struct _whvp_context {
   //WHV_REGISTER_VALUE pending_event;
   //WHV_REGISTER_VALUE deliverability_notifications;
   //WHV_REGISTER_VALUE internal_activity_state;
+
+  WHV_REGISTER_VALUE xcr0;
 };
 
 // Function pointers passed to the Rust DLL for accessing things they need in
