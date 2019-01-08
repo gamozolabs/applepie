@@ -89,7 +89,59 @@ Install 64-bit Cygwin (https://www.cygwin.com/setup-x86_64.exe) specifically to 
 
 Go into "Turn Windows features on or off" and tick the checkbox next to "Hyper-V" and "Windows Hypervisor Platform". This requires of course that your computer supports Hyper-V.
 
-##### Hopefully I'm not forgetting other requirements
+## Step-by-step build process
+
+This install process guide was verified on the following:
+```
+Clean install of Windows 10, Build 17763
+rustc 1.33.0-nightly (8e2063d02 2019-01-07)
+Microsoft (R) C/C++ Optimizing Compiler Version 19.16.27025.1 for x64
+Visual Studio Community 2017 version 15.9.4
+applepie commit `f84c084feb487e2e7f31f9052a4ab0addd2c4cf9`
+Python 3.7.2 x64
+git version 2.20.1.windows.1
+```
+
+- Make sure Windows 10 is fully up to date
+	- We use some bleeding edge features with WHVP and only latest Windows 10 is tested
+- In "Turn Windows features on or off"
+	- Tick "Hyper-V"
+	- Tick "Windows Hypervisor Platform"
+	- Click ok to install and reboot
+
+![windows features](assets/winfeatures.png)
+
+- Install VS Community 2017 and updated
+	- Desktop development with C++
+
+![vsconfig](assets/vsconfig.png)
+
+- Install Rust nightly for x86_64-pc-windows-msvc
+![rustconfig](assets/rustconfig.png)
+![rust installed](assets/rust_installed.png)
+- Install Git
+	- Configure git to checkout as-is, commit unix-style
+	- If git converts on checkout the ./configure script will fail for Bochs due to CRLF line endings
+	- This is core.autocrlf=input
+	- You can also use checkout as-is, commit as-is
+	- This is core.autocrlf=false
+- Install Cygwin x64 via setup-x86_64.exe
+	- Install to "C:\cygwin64"
+	- Install autoconf package (`autoconf` package)
+	- Install GNU make (`make` package)
+- Install Python
+	- I installed Python 3 x64 and added to PATH
+	- Python 2 and 32-bit versions should be fine, we just use Python for our build script
+- Open a "x64 Native Tools Command Prompt for VS 2017"
+- Checkout applepie via `git clone https://github.com/gamozolabs/applepie`
+- cd into applepie
+- Run `python build.py`
+	- This will first check for some basic system requirements
+	- It will build the Rust bochservisor DLL
+	- It will then configure Bochs via autoconf
+	- It will then build Bochs with GNU make from Cygwin
+
+This initial build process may take about 2 minutes, on a modern machine it's likely 20-30 seconds.
 
 ## Actually Building
 
