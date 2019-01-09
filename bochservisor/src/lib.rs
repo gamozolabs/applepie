@@ -188,6 +188,7 @@ struct Statistics {
 /// A single module worth of coverage information
 /// 
 /// There is one of these structures for each module
+#[derive(Clone)]
 struct CoverageEntry {
     /// Bitmap of covered offsets in this module. One bit per byte of the
     /// image size
@@ -405,22 +406,44 @@ fn dump_coverage(coverage: &Vec<Option<CoverageEntry>>) {
     // Nothing to report
     if coverage.len() <= 0 { return; }
 
-    print!("Coverage:\n");
-
+    // Track total number of unique coverage entries
     let mut sum = 0;
 
+    // Track the largest filename so we can print cleanly
+    let mut largest_filename = 0;
+
+    // Create a copy of the coverage listing
+    let mut coverage_sorted = Vec::new();
     for (ordinal, entry) in coverage.iter().enumerate() {
-        if entry.is_none() { continue; }
-        let entry = entry.as_ref().unwrap();
+        if let Some(entry) = entry {
+            // Get the module info for this ordinal
+            let modinfo = win32::ordinal_to_modinfo(ordinal as win32::Ordinal)
+                .expect("Got coverage on ordinal that doesn't exist!?");
 
-        let modinfo = win32::ordinal_to_modinfo(ordinal as win32::Ordinal)
-            .expect("Got coverage on ordinal that doesn't exist!?");
+            // Update the largest filename stat
+            largest_filename =
+                std::cmp::max(largest_filename, modinfo.name().len());
 
-        print!("{:32} | {:7} unique offsets\n", modinfo.name(), entry.unique);
-        sum += entry.unique;
+            coverage_sorted.push((ordinal, entry.unique));
+        }
     }
 
-    print!("Coverage total: {:10}\n", sum);
+    // Sort by frequency
+    coverage_sorted.sort_by_key(|x| x.1);
+
+    print!("Coverage:\n");
+
+    // Print out all the per-module coverage info
+    for (ordinal, unique) in coverage_sorted.iter() {
+        let modinfo = win32::ordinal_to_modinfo(*ordinal as win32::Ordinal)
+            .expect("Got coverage on ordinal that doesn't exist!?");
+        print!("{:width$} | {:7} unique offsets\n",
+            modinfo.name(), unique, width = largest_filename);
+        sum += unique;
+    }
+
+    print!("Modules containing coverage: {:10}\n", coverage_sorted.len());
+    print!("Coverage total:              {:10}\n", sum);
 }
 
 #[no_mangle]
