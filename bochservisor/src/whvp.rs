@@ -741,7 +741,7 @@ impl Whvp {
         unsafe {
             vmexits.__bindgen_anon_1.set_ExceptionExit(0);
             vmexits.__bindgen_anon_1.set_X64MsrExit(1);
-            vmexits.__bindgen_anon_1.set_X64CpuidExit(0);
+            vmexits.__bindgen_anon_1.set_X64CpuidExit(1);
         }
         let res = unsafe { WHvSetPartitionProperty(partition,
             WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExtendedVmExits,

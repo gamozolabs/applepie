@@ -36,7 +36,7 @@ const MAX_EMULATE: u64 = 1000;
 /// Discard reads/writes to the framebuffer when in the hypervisor. This breaks
 /// screen updates but gives a performance boost if you only care about RDP/SSH
 /// into the guest
-const DEVNULL_FRAMEBUFFERS: bool = true;
+const DEVNULL_FRAMEBUFFERS: bool = false;
 
 // Bochs permissions used for `get_memory_backing`
 const BX_READ:    i32 = 0;
@@ -988,7 +988,45 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid => {
-                    persist.emulating += EMULATE_STEPS;
+                    // Manually handle CPUIDs
+                    let cpuid = unsafe { &vmexit.__bindgen_anon_1.CpuidAccess };
+
+                    // Get the leaf and subleaf the MSR is trying to access
+                    let leaf    = cpuid.Rax;
+                    let subleaf = cpuid.Rcx;
+
+                    // Get the ones that Hyper-V would have returned inside the
+                    // VM
+                    let rax = cpuid.DefaultResultRax;
+                    let rbx = cpuid.DefaultResultRbx;
+                    let mut rcx = cpuid.DefaultResultRcx;
+                    let rdx = cpuid.DefaultResultRdx;
+
+                    // Modify cpuid info
+                    match (leaf, subleaf) {
+                        (1, _) => {
+                            // Disable xsave/xrstor support
+                            // We don't know if we can safely sync these between
+                            // bochs yet so we disable AVX.
+                            rcx &= !(1 << 26);
+                        }
+                        _ => {}
+                    }
+
+                    // Update context
+                    context.rax.Reg64  = rax;
+                    context.rbx.Reg64  = rbx;
+                    context.rcx.Reg64  = rcx;
+                    context.rdx.Reg64  = rdx;
+
+                    // Advance RIP past the cpuid instruction
+                    unsafe {
+                        context.rip.Reg64 +=
+                            vmexit.VpContext.InstructionLength() as u64;
+                    }
+                    
+                    // Write out the context and reenter the VM
+                    (routines.set_context)(&context);
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
