@@ -9,19 +9,16 @@ pub mod symdumper;
 pub mod symloader;
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
 use whvp_bindings::winhvplatform::*;
 use crate::win32::{get_modlist, find_kernel_modlist};
 use crate::symloader::Symbols;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use crate::win32::{ModuleList, ModuleInfo};
+use crate::win32::{ModuleList};
 use std::fs::File;
 use std::io::Write;
-
-/// Unknown module name
-const UNKNOWN_MODULE_NAME: &'static str = "<unknown>";
 
 /// Number of instructions to step in emulation mode after a vmexit
 const EMULATE_STEPS: u64 = 100;
@@ -29,6 +26,9 @@ const EMULATE_STEPS: u64 = 100;
 /// Disables coverage entirely if this is `true`
 /// This helps a lot with performance if you're not concerned with coverage info
 const COVERAGE_DISABLE: bool = false;
+
+/// Logs coverage using symbols to the file `coverage.txt`.
+const LOG_COVERAGE_SYMBOLS: bool = false;
 
 // Bochs permissions used for `get_memory_backing`
 const BX_READ:    i32 = 0;
@@ -185,6 +185,18 @@ struct Statistics {
     module_list_walks: u64,
 }
 
+/// A single module worth of coverage information
+/// 
+/// There is one of these structures for each module
+struct CoverageEntry {
+    /// Bitmap of covered offsets in this module. One bit per byte of the
+    /// image size
+    bitmap: Vec<u8>,
+
+    /// Number of unique offsets observed in this module
+    unique: u64,
+}
+
 // Due to bochs using longjmps we must place a lot of state in this structure
 // so we don't lose it when our code suddenly gets hijacked and reenters from
 // the start
@@ -216,7 +228,7 @@ struct PersistState {
     memory: MemReader,
 
     /// Code coverage information per module
-    coverage: HashMap<ModuleInfo<'static>, HashSet<usize>>,
+    coverage: Vec<Option<CoverageEntry>>,
 
     /// Symbols
     symbols: Symbols,
@@ -389,25 +401,26 @@ impl virtmem::PhysMem for MemReader {
 }
 
 /// Dump the coverage table to the console
-fn dump_coverage(coverage: &HashMap<ModuleInfo<'static>, HashSet<usize>>) {
-    if coverage.len() > 0 {
-        print!("Coverage:\n");
-    }
+fn dump_coverage(coverage: &Vec<Option<CoverageEntry>>) {
+    // Nothing to report
+    if coverage.len() <= 0 { return; }
+
+    print!("Coverage:\n");
 
     let mut sum = 0;
-    let mut named_sum = 0;
 
-    for (module, offsets) in coverage.iter() {
-        print!("{:32} | {:7} unique offsets\n", module.name(), offsets.len());
+    for (ordinal, entry) in coverage.iter().enumerate() {
+        if entry.is_none() { continue; }
+        let entry = entry.as_ref().unwrap();
 
-        if module.name() != UNKNOWN_MODULE_NAME { named_sum += offsets.len(); }
-        sum += offsets.len();
+        let modinfo = win32::ordinal_to_modinfo(ordinal as win32::Ordinal)
+            .expect("Got coverage on ordinal that doesn't exist!?");
+
+        print!("{:32} | {:7} unique offsets\n", modinfo.name(), entry.unique);
+        sum += entry.unique;
     }
 
-    if coverage.len() > 0 {
-        print!("Module coverage: {:10}\n", named_sum);
-        print!("Coverage total:  {:10}\n", sum);
-    }
+    print!("Coverage total: {:10}\n", sum);
 }
 
 #[no_mangle]
@@ -421,7 +434,7 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
     // Obtain the thread local
     PERSIST.with(|x| {
         // Borrow the thread local
-        let mut persist = x.borrow_mut();
+        let persist = &mut *x.borrow_mut();
 
         persist.stats.coverage_callbacks += 1;
 
@@ -430,16 +443,23 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
         // Quick and dirty coverage
         let kml = persist.kernel_module_list;
 
+        // Split structure references to help with borrowck
+        let mlc      = &mut persist.module_list_cache;
+        let coverage = &mut persist.coverage;
+        let memory   = &mut persist.memory;
+        let stats    = &mut persist.stats;
+
         // Get the module offset for this RIP
-        let mut cached = persist.module_list_cache.get_modoff(rip);
+        let mut cached = mlc.get_modoff(rip);
+
         if cached.0.is_none() {
             // Module didn't resolve from the cache, rewalk the module list
             // to check for updates
-            persist.stats.module_list_walks += 1;
-            if let Ok(ml) = get_modlist(&mut persist.memory, cr3, lma, gs_base, cs, kml) {
+            stats.module_list_walks += 1;
+            if let Ok(ml) = get_modlist(memory, cr3, lma, gs_base, cs, kml) {
                 //print!("Updating module list cache\n");
-                persist.module_list_cache = ml;
-                cached = persist.module_list_cache.get_modoff(rip);
+                *mlc = ml;
+                cached = mlc.get_modoff(rip);
             } else {
                 // Couldn't resolve module and couldn't update module list
                 // we can't do anything at this point
@@ -447,39 +467,68 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
             }
         }
 
-        // Unwrap module offset
-        let (modinfo, offset) = cached;
-
         // If we were able to resolve the module, report the coverage
-        if let Some(module) = modinfo {
-            let module = module.deepclone();
+        if let (Some(module), offset) = cached {
+            let size    = module.size() as usize;
+            let ordinal = module.ordinal() as usize;
 
-            // Create a new entry for this module
-            if !persist.coverage.contains_key(&module) {
-                persist.coverage.insert(module.deepclone(),
-                    HashSet::with_capacity(1000000));
+            // Make sure there are enough entries in the coverage list for our
+            // ordinal to be valid
+            while ordinal >= coverage.len() {
+                coverage.push(None);
             }
 
-            // Insert this offset into the module's coverage
-            let module_entry =
-                persist.coverage.get_mut(&module.deepclone()).unwrap();
-            if module_entry.insert(offset) {
-                // First time seeing this coverage
+            // The above loop makes sure the ordinal is a valid index into
+            // coverage but it is still potentially a None value.
+            if coverage[ordinal].is_none() {
+                // Get the image size rounded up to the nearest byte boundary
+                let imagesize = (size + 7) & !7;
+
+                let covent = CoverageEntry {
+                    bitmap: vec![0u8; imagesize],
+                    unique: 0,
+                };
+
+                coverage[ordinal] = Some(covent);
+            }
+
+            // Get a mutable reference to this corresponding coverage entry
+            let covent = coverage[ordinal].as_mut().unwrap();
+
+            // Calculate bitmap offsets
+            let byte = offset / 8;
+            let bit  = offset % 8;
+
+            // Check if we've seen this offset before
+            if (covent.bitmap[byte] & (1 << bit)) == 0 {
+                // Record that we got new coverage so we can return that
+                // information to the caller
                 new_coverage = true;
 
-                if let Some(sym) = 
-                        persist.symbols.resolve(&module, offset) {
-                    if persist.coverage_log_file.is_none() {
-                        persist.coverage_log_file = Some(
-                            File::create("coverage.txt")
-                                .expect("Failed to open coverage output")
-                        );
-                    }
+                // Update bitmap
+                covent.bitmap[byte] |= 1 << bit;
 
-                    let clf = persist.coverage_log_file.as_mut().unwrap();
-                    clf.write(format!("{}\n", sym).as_bytes())
-                        .expect("Failed to write coverage entry");
-                    clf.flush().expect("Failed to flush coverage file");
+                // Update unique count
+                covent.unique += 1;
+
+                // Only use symbol coverage if requested
+                if LOG_COVERAGE_SYMBOLS {
+                    // Try to look up the symbol for this new coverage
+                    if let Some(sym) = persist.symbols.resolve(module, offset) {
+                        // Create the log file if it's not already open
+                        if persist.coverage_log_file.is_none() {
+                            persist.coverage_log_file = Some(
+                                File::create("coverage.txt")
+                                    .expect("Failed to open coverage output")
+                            );
+                        }
+
+                        // Write the symbol to the log file
+                        let clf = persist.coverage_log_file.as_mut().unwrap();
+                        clf.write(format!("{}\n", sym).as_bytes())
+                            .expect("Failed to write coverage entry");
+                        clf.flush().expect("Failed to flush coverage file");
+                    }
                 }
             }
         } else {

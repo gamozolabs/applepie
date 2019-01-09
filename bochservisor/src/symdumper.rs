@@ -290,7 +290,7 @@ pub fn get_symbols_from_file(pe_file: &str) -> SymbolContext {
 /// Get all of the symbols from a module `module_name` with a TimeDateStamp
 /// and SizeOfImage from the PE header. This will automatically download the
 /// module and PDB from the symbol store using symchk
-pub fn get_symbols_from_module<'a>(module: &ModuleInfo<'a>)
+pub fn get_symbols_from_module(module: &ModuleInfo)
     -> std::io::Result<SymbolContext>
 {
     // Use symchk to download the module and symbols

@@ -6,7 +6,7 @@ use crate::symdumper::{get_symbols_from_module, SymbolContext};
 #[derive(Default)]
 pub struct Symbols {
     /// Symbols per module name
-    modules: HashMap<ModuleInfo<'static>, SymbolContext>,
+    modules: HashMap<ModuleInfo, SymbolContext>,
 }
 
 impl Symbols {
@@ -20,11 +20,11 @@ impl Symbols {
             print!("Loaded symbols for {:x?}\n", module);
 
             // Update the database
-            self.modules.insert(module.deepclone(), symbols);
+            self.modules.insert(module.clone(), symbols);
         } else {
             // Failed to download the symbols, create an empty entry in the
             // `HashMap` so we don't keep trying to re-download
-            self.modules.insert(module.deepclone(), SymbolContext::default());
+            self.modules.insert(module.clone(), SymbolContext::default());
         }
 
         Ok(())

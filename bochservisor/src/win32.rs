@@ -1,45 +1,90 @@
 use crate::MemReader;
 use crate::whvp::WhvpContext;
 use std::fmt::Write;
-use std::borrow::Cow;
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+pub type Ordinal = u32;
+
+#[derive(Default)]
+struct OrdinalLookup {
+    modinfo_to_ord: HashMap<ModuleInfo, Ordinal>,
+    ord_to_modinfo: Vec<ModuleInfo>,
+}
+
+thread_local! {
+    /// Ordinal tables
+    static ORDINAL: RefCell<OrdinalLookup> = RefCell::new(Default::default());
+}
+
+/// Gets an existing ordinal or allocates a new one for a given module
+fn allocate_ordinal(module: &ModuleInfo) -> Ordinal {
+    ORDINAL.with(|x| {
+        let mut x = x.borrow_mut();
+        
+        if let Some(existing) = x.modinfo_to_ord.get(module) {
+            *existing
+        } else {
+            assert!(x.modinfo_to_ord.len() == x.ord_to_modinfo.len());
+            let ordinal = x.modinfo_to_ord.len() as Ordinal;
+            x.modinfo_to_ord.insert(module.clone(), ordinal);
+            x.ord_to_modinfo.push(module.clone());
+            assert!(x.modinfo_to_ord.len() == x.ord_to_modinfo.len());
+            ordinal
+        }
+    })
+}
+
+/// Looks up a module info structure from an ordinal
+/// Note that this function is expensive as it clones the `ModuleInfo`
+pub fn ordinal_to_modinfo(ordinal: Ordinal) -> Option<ModuleInfo> {
+    ORDINAL.with(|x| {
+        let x = x.borrow();
+        x.ord_to_modinfo.get(ordinal as usize).cloned()
+    })
+}
 
 /// All information to uniquely identify a module
 #[derive(PartialOrd, Ord, PartialEq, Eq, Hash, Clone, Debug)]
-pub struct ModuleInfo<'a> {
-    name:          Cow<'a, str>,
+pub struct ModuleInfo {
+    name:          String,
     timedatestamp: u32,
     sizeofimage:   u32,
+    ordinal:       Ordinal,
 }
 
-impl<'a> ModuleInfo<'a> {
+impl ModuleInfo {
     /// Create a new `ModuleInfo`
-    pub fn new(module: Cow<'a, str>, timedatestamp: u32, sizeofimage: u32) -> Self {
-        ModuleInfo {
-            name: module.into(),
+    pub fn new(module: String, timedatestamp: u32, sizeofimage: u32) -> Self {
+        let mut ret = ModuleInfo {
+            name: module,
             timedatestamp,
-            sizeofimage
-        }
+            sizeofimage,
+            ordinal: 0,
+        };
+
+        ret.ordinal = allocate_ordinal(&ret);
+        ret
     }
 
-    /// Clones a `ModuleInfo` to change the lifetime
-    pub fn deepclone<'b>(&self) -> ModuleInfo<'b> {
-        ModuleInfo {
-            name:          self.name.to_string().into(),
-            timedatestamp: self.timedatestamp,
-            sizeofimage:   self.sizeofimage
-        }
-    }
-
+    #[inline]
     pub fn name(&self) -> &str { &self.name }
-    pub fn time(&self) -> u32  { self.timedatestamp }
-    pub fn size(&self) -> u32  { self.sizeofimage }
+
+    #[inline]
+    pub fn time(&self) -> u32 { self.timedatestamp }
+
+    #[inline]
+    pub fn size(&self) -> u32 { self.sizeofimage }
+
+    #[inline]
+    pub fn ordinal(&self) -> Ordinal { self.ordinal }
 }
 
 /// Module entry
 #[derive(Debug)]
 pub struct ModuleEntry {
     /// Info to uniquely identify this module
-    info: ModuleInfo<'static>,
+    info: ModuleInfo,
 
     /// Base address of the module
     base: usize,
@@ -175,8 +220,7 @@ fn get_modlist_user<'a>(modlist: &mut ModuleList,
 
         // Append this to the module list
         modlist.add_module(ModuleEntry {
-            info: ModuleInfo::new(name_utf8.into(),
-                                  time_date_stamp, size_of_image),
+            info: ModuleInfo::new(name_utf8, time_date_stamp, size_of_image),
             base,
             len,
         });
@@ -317,8 +361,7 @@ fn get_modlist_kernel<'a>(modlist: &mut ModuleList,
 
         // Append this to the module list
         modlist.add_module(ModuleEntry {
-            info: ModuleInfo::new(name_utf8.into(),
-                                  time_date_stamp, size_of_image),
+            info: ModuleInfo::new(name_utf8, time_date_stamp, size_of_image),
             base,
             len,
         });
