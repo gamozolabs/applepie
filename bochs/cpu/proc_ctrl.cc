@@ -666,6 +666,7 @@ void BX_CPP_AttrRegparmN(1) BX_CPU_C::RDTSC(bxInstruction_c *i)
 #endif
 
   // return ticks
+  BX_CPU_THIS_PTR set_TSC(__rdtsc());
   Bit64u ticks = BX_CPU_THIS_PTR get_TSC();
 
   RAX = GET32L(ticks);
@@ -710,6 +711,7 @@ void BX_CPP_AttrRegparmN(1) BX_CPU_C::RDTSCP(bxInstruction_c *i)
 #endif
 
   // return ticks
+  BX_CPU_THIS_PTR set_TSC(__rdtsc());
   Bit64u ticks = BX_CPU_THIS_PTR get_TSC();
 
   RAX = GET32L(ticks);

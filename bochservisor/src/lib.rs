@@ -21,7 +21,7 @@ use std::fs::File;
 use std::io::Write;
 
 /// Number of instructions to step in emulation mode after a vmexit
-const EMULATE_STEPS: u64 = 100;
+const EMULATE_STEPS: u64 = 250;
 
 /// Disables coverage entirely if this is `true`
 /// This helps a lot with performance if you're not concerned with coverage info
@@ -29,6 +29,14 @@ const COVERAGE_DISABLE: bool = false;
 
 /// Logs coverage using symbols to the file `coverage.txt`.
 const LOG_COVERAGE_SYMBOLS: bool = false;
+
+/// Maximum amount of instructions to emulate at a given time
+const MAX_EMULATE: u64 = 1000;
+
+/// Discard reads/writes to the framebuffer when in the hypervisor. This breaks
+/// screen updates but gives a performance boost if you only care about RDP/SSH
+/// into the guest
+const DEVNULL_FRAMEBUFFERS: bool = true;
 
 // Bochs permissions used for `get_memory_backing`
 const BX_READ:    i32 = 0;
@@ -198,6 +206,11 @@ struct CoverageEntry {
     unique: u64,
 }
 
+// Dummy aligned structure
+#[repr(C, align(4096))]
+#[derive(Clone, Copy)]
+struct Page([u8; 4096]);
+
 // Due to bochs using longjmps we must place a lot of state in this structure
 // so we don't lose it when our code suddenly gets hijacked and reenters from
 // the start
@@ -245,6 +258,15 @@ struct PersistState {
 
     /// Statistics
     stats: Statistics,
+
+    /// Number of instructions to emulate next CPU loop iteration
+    emulating: u64,
+
+    /// Normal framebuffer backing memory 0xa0000-0xbffff
+    normal_fb: Vec<Page>,
+
+    /// Linear framebuffer backing memory 0xe0000000-0xe0ffffff
+    linear_fb: Vec<Page>,
 }
 
 thread_local! {
@@ -558,6 +580,11 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
             // Unknown module
         }
 
+        // If we got new coverage, emulate for longer
+        if new_coverage {
+            persist.emulating += 100;
+        }
+
         new_coverage
     })
 }
@@ -713,6 +740,42 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 new_hyp.map_memory(mr.paddr, sliced, mr.perms);
             }
 
+            if DEVNULL_FRAMEBUFFERS {
+                // Map in the framebuffers to the guest such that reads/writes
+                // just are treated as normal RAM. This cuts down on vmexits
+                // for framebuffer updates.
+                // This is only usable if you use RDP or SSH or something to
+                // access your guest, otherwise you get a corrupt/partially
+                // updated screen
+
+                // Normal framebuffer is at 0xa0000 for 128 KiB
+                // linear framebuffer is at 0xe0000000 for 16 MiB
+
+                // Allocate pages for framebuffers
+                persist.normal_fb = vec![Page([0u8; 4096]);     128*1024 / 4096];
+                persist.linear_fb = vec![Page([0u8; 4096]); 16*1024*1024 / 4096];
+
+                // Map in normal framebuffer
+                assert!(std::mem::size_of_val(
+                    persist.normal_fb.as_slice()) == 128 * 1024);
+                let sliced = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        persist.normal_fb.as_mut_ptr() as *mut u8,
+                        std::mem::size_of_val(persist.normal_fb.as_slice()))
+                };
+                new_hyp.map_memory(0xa0000, sliced, PERM_READ | PERM_WRITE);
+
+                // Map in linear framebuffer
+                assert!(std::mem::size_of_val(
+                    persist.linear_fb.as_slice()) == 16 * 1024 * 1024);
+                let sliced = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        persist.linear_fb.as_mut_ptr() as *mut u8,
+                        std::mem::size_of_val(persist.linear_fb.as_slice()))
+                };
+                new_hyp.map_memory(0xe0000000, sliced, PERM_READ | PERM_WRITE);
+            }
+
             // Get the raw handle for this partition and create the kicker
             // thread which is responsible for on an interval causing VMEXITS
             // which gives us a chance to deliver interrupts
@@ -727,7 +790,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
             // Compute first report time
             persist.future_report =
-                time::rdtsc() + persist.tickrate.unwrap() as u64;
+                time::rdtsc() + (persist.tickrate.unwrap() as u64) * 5;
 
             // Save the time of hypervisor creation
             persist.start = time::rdtsc();
@@ -740,10 +803,8 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
             persist.last_sync_cycles = time::rdtsc();
         }
 
-        // Value which counts how many blocks we want to emulate in bochs
-        // When this is 0 we use the hypervisor, when this is non-zero we run
-        // that many steps in Bochses emulator
-        let mut emulating = 0;
+        // We expect on reentry that we try the hypervisor first
+        persist.emulating = 0;
 
         loop {
             {
@@ -805,18 +866,24 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
                 // Update the next report time
                 persist.future_report = time::rdtsc() +
-                    persist.tickrate.unwrap() as u64;
+                    (persist.tickrate.unwrap() as u64) * 5;
             }
 
             // If we're requesting emulation, step using Bochs
-            if emulating > 0 {
+            persist.emulating = std::cmp::min(MAX_EMULATE, persist.emulating);
+            if persist.emulating > 0 {
+                let emu = persist.emulating;
+
                 // Emulate instructions with Bochs!
                 std::mem::drop(persist);
-                (routines.step_cpu)(emulating);
+                (routines.step_cpu)(emu);
                 persist = x.borrow_mut();
 
-                // Indicate no more desire to emulate, loop again
-                emulating = 0;
+                // Subtract the amount we just emulated from the emulating
+                // number.
+                // We don't zero it because coverage could cause this to update
+                persist.emulating = persist.emulating.checked_sub(emu)
+                    .expect("Underflow on emulating");
                 continue;
             }
 
@@ -857,11 +924,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 let cs = unsafe { context.cs.Segment.Selector };
                 let rip = context.rip() as usize;
 
-                if report_coverage(cr3, lma, gs_base, cs, rip) {
-                    // New coverage detected, step for a bit
-                    emulating += 1000;
-                }
-
+                report_coverage(cr3, lma, gs_base, cs, rip);
                 persist = x.borrow_mut();
             }
 
@@ -888,7 +951,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating += EMULATE_STEPS;
+                    persist.emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
@@ -897,16 +960,12 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // mix between performance and latency. <10 is unusable.
                     // >1000 introduces latency
                     // (cursor stutters when moving, etc)
-                    emulating += EMULATE_STEPS;
+                    persist.emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Halt => {
                     // Emulate halts by emulating using Bochs for a bit
-                    // Note this is tunable but 100 seems to by far be the best
-                    // mix between performance and latency. <10 is unusable.
-                    // >1000 introduces latency
-                    // (cursor stutters when moving, etc)
-                    emulating += EMULATE_STEPS;
+                    persist.emulating += 1;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonCanceled => {
@@ -925,11 +984,11 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                     // Not sure which state is going bad here, or if it's some
                     // CPUID/MSR desync issue with Bochs
                     //print!("Warning: Invalid VP state, emulating for a bit\n");
-                    emulating += EMULATE_STEPS;
+                    persist.emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64Cpuid => {
-                    emulating += EMULATE_STEPS;
+                    persist.emulating += EMULATE_STEPS;
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64InterruptWindow => {
@@ -939,7 +998,7 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess => {
                     // Handle MSR read/writes
-                    emulating += EMULATE_STEPS;
+                    persist.emulating += EMULATE_STEPS;
                     continue;
                 }
                 _ => {

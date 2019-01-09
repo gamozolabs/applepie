@@ -41,13 +41,14 @@ error: action=report
 panic: action=ask
 keyboard: type=mf, serial_delay=250, paste_delay=100000, user_shortcut=none
 mouse: type=ps2, enabled=false, toggle=ctrl+mbutton
-sound: waveoutdrv=win, waveout="/dev/dsp.wavein=", waveindrv=win, wavein=none, midioutdrv=win, midiout=none
-speaker: enabled=true, mode=sound
-parport1: enabled=false
-parport2: enabled=false
+#sound: waveoutdrv=win, waveout="/dev/dsp.wavein=", waveindrv=win, wavein=none, midioutdrv=win, midiout=none
+#speaker: enabled=true, mode=sound
+#parport1: enabled=false
+#parport2: enabled=false
 #com1: enabled=true, mode=pipe-server, dev=\\.\pipe\debuggy
 #com2: enabled=false
 #com3: enabled=false
 #com4: enabled=false
 #e1000: enabled=1, mac=52:54:00:12:34:56, ethmod=win32, ethdev=\Device\NPF_{09C2DAE0-287C-43EB-86FA-C7134CD839B1}
+e1000: enabled=1, mac=52:54:00:12:34:56, ethmod=slirp, script="slirpcfg.cfg"
 #usb_ohci: enabled=1, port1=tablet, options1="speed:full"
