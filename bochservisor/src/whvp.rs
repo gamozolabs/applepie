@@ -477,6 +477,11 @@ pub struct Whvp {
     /// Buffer to hold the dirty bitmaps. We just cache this allocation for
     /// performance
     dirty_bitmap_tmp: Vec<u64>,
+
+    /// Tracks if memory can be dirty. This is set when we run the guest, and
+    /// cleared when we clear dirty memory. It's an optimization for not doing
+    /// anything to clear dirty memory when we haven't run the hypervisor.
+    memory_dirty: bool,
 }
 
 impl Whvp {
@@ -731,6 +736,7 @@ impl Whvp {
             xsave_features,
             memory_regions: Vec::new(),
             dirty_bitmap_tmp: vec![0u64; (4*1024*1024*1024) / (4096 * 64)],
+            memory_dirty: false,
         };
 
         // Register that we only want one processor
@@ -860,6 +866,9 @@ impl Whvp {
     // xperf -d trace.etl
     pub fn get_dirty_list(&mut self, dirty_bits_l1: &mut [u64],
             dirty_bits_l2: &mut [u64]) {
+        // Nothing to do if we haven't run the hypervisor since the last reset
+        if !self.memory_dirty { return; }
+        
         unsafe {
             let bitmap = &mut self.dirty_bitmap_tmp;
 
@@ -905,6 +914,9 @@ impl Whvp {
                 }
             }
         }
+
+        // Memory can no longer be dirty as we've restored it
+        self.memory_dirty = false;
     }
 
     // Run the hypervisor until exit, returning the exit context
@@ -915,6 +927,10 @@ impl Whvp {
             &mut context as *mut WHV_RUN_VP_EXIT_CONTEXT as *mut c_void,
             std::mem::size_of_val(&context) as u32) };
         assert!(res == 0, "WHvRunVirtualProcessor() error: {:#x}", res);
+
+        // Mark that memory may be dirty
+        self.memory_dirty = true;
+
         context
     }
 
