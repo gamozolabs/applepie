@@ -83,6 +83,11 @@ BX_MEM_C::~BX_MEM_C()
   cleanup_memory();
 }
 
+#ifdef BOCHSERVISOR
+// Pointer to read-only mapping of original RAM
+void *original_memory = NULL;
+#endif
+
 void BX_MEM_C::init_memory(Bit64u guest, Bit64u host)
 {
   unsigned i, idx;
@@ -100,7 +105,99 @@ void BX_MEM_C::init_memory(Bit64u guest, Bit64u host)
     BX_MEM_THIS vector = NULL;
     BX_MEM_THIS blocks = NULL;
   }
+
+#ifdef BOCHSERVISOR
+#if BX_LARGE_RAMFILE
+#error "falkpatch does not work with large ramfile!!! disable it in ./configure or config.h"
+#endif
+
+  // If we're restoring from a snapshot, mmap the ram
+  if(SIM->get_param_bool(BXPN_RESTORE_FLAG)->get()) {
+    const uintptr_t MEM_LOCATION  = 0x133700000000ULL;
+    const uintptr_t ORIG_LOCATION = 0x333700000000ULL;
+    HANDLE file;
+    HANDLE hmap;
+    LARGE_INTEGER filesize;
+    char *ramfile_filename = NULL;
+
+    // Get the snapshot location
+    char *snapshot_folder = SIM->get_param_string(BXPN_RESTORE_PATH)->getptr();
+    ramfile_filename = (char*)calloc(1, 12 + strlen(snapshot_folder));
+    if(!ramfile_filename) {
+      fprintf(stderr, "Failed to calloc() for snapshot filename\n");
+      exit(-1);
+    }
+
+    // Create the full relative path to the memory.ram file, this contains all
+    // the memory for the guest
+    sprintf(ramfile_filename, "%s/memory.ram", snapshot_folder);
+    printf("Using falk fast restore RAM: %s\n", ramfile_filename);
+
+    // Open file
+    file = CreateFile(ramfile_filename,
+                      GENERIC_READ,
+                      FILE_SHARE_READ,
+                      NULL,
+                      OPEN_EXISTING,
+                      FILE_ATTRIBUTE_NORMAL,
+                      NULL);
+    if(file == INVALID_HANDLE_VALUE) {
+      fprintf(stderr, "CreateFile() error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    if(!GetFileSizeEx(file, &filesize)) {
+      fprintf(stderr, "GetFileSizeEx() error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    if((filesize.QuadPart & 0xfff) != 0) {
+      fprintf(stderr, "memory.ram file was not page-aligned size\n");
+      exit(-1);
+    }
+
+    // Create mapping
+    hmap = CreateFileMapping(file, NULL, PAGE_WRITECOPY, filesize.HighPart, filesize.LowPart, NULL);
+    if(!hmap) {
+      fprintf(stderr, "CreateFileMapping() error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    // Map the file as CoW
+    void *map = MapViewOfFileEx(hmap, FILE_MAP_COPY, 0, 0, filesize.QuadPart, (void*)MEM_LOCATION);
+    if(map != (void*)MEM_LOCATION) {
+      fprintf(stderr, "MapViewOfFileEx(map) error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    // Map in another copy of the file as read-only so we have something to
+    // restore to
+    original_memory = MapViewOfFileEx(hmap, FILE_MAP_READ, 0, 0, filesize.QuadPart, (void*)ORIG_LOCATION);
+    if(original_memory != (void*)ORIG_LOCATION) {
+      fprintf(stderr, "MapViewOfFileEx(map2) error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    // Now we need to map in extra space directly after the memory for the ROMs
+    void *rommem = VirtualAlloc((void*)(MEM_LOCATION + filesize.QuadPart), BIOSROMSZ + EXROMSIZE + 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if(rommem != (void*)(MEM_LOCATION + filesize.QuadPart)) {
+      fprintf(stderr, "VirtualAlloc() error : %d\n", GetLastError());
+      exit(-1);
+    }
+
+    free(ramfile_filename);
+
+    // Set up pointers to use this memory we loaded
+    BX_MEM_THIS actual_vector = (Bit8u*)MEM_LOCATION;
+    BX_MEM_THIS vector = (Bit8u*)MEM_LOCATION;
+  } else {
+    // Not restoring from snapshot, use standard memory allocation
+    BX_MEM_THIS vector = alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN);
+  }
+#else
   BX_MEM_THIS vector = alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN);
+#endif
+
   BX_INFO(("allocated memory at %p. after alignment, vector=%p",
         BX_MEM_THIS actual_vector, BX_MEM_THIS vector));
 
@@ -332,7 +429,13 @@ void BX_MEM_C::cleanup_memory()
   unsigned idx;
 
   if (BX_MEM_THIS vector != NULL) {
+#ifndef BOCHSERVISOR
+    // Don't delete the backing vector as it was mapped. This prevents a crash
+    // on exit. Technically we should unmap the file here but we're about to
+    // exit anyways? :D
     delete [] BX_MEM_THIS actual_vector;
+#endif
+
     BX_MEM_THIS actual_vector = NULL;
     BX_MEM_THIS vector = NULL;
     BX_MEM_THIS rom = NULL;

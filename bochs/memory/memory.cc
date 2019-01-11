@@ -42,6 +42,37 @@ void BX_MEM_C::writePhysicalPage(BX_CPU_C *cpu, bx_phy_address addr, unsigned le
   bx_phy_address a20addr = A20ADDR(addr);
   struct memory_handler_struct *memory_handler = NULL;
 
+#ifdef BOCHSERVISOR
+  // Defined in main.cc
+  extern Bit64u dirty_bits_l1[(4ULL * 1024 * 1024 * 1024) / (1024 * 1024 * 64)];
+  extern Bit64u dirty_bits_l2[(4ULL * 1024 * 1024 * 1024) / (4096 * 64)];
+
+  // Compute the 4 KiB aligned addresses for the start and end of the region
+  // being written
+  bx_phy_address aligned_addr = a20addr & ~0xfff;
+  bx_phy_address end_addr     = (a20addr + len + 0xfff) & ~0xfff;
+
+  // Go through each 4 KiB page that will be touched by this write
+  for(bx_phy_address dirty_addr = aligned_addr; aligned_addr < end_addr;
+      aligned_addr += 4096) {
+    // Bounds check
+    if(dirty_addr >= 0x100000000ULL) {
+      fprintf(stderr, "Whoa, writing to high 4 GiB?!?\n");
+      exit(-1);
+    }
+
+    // Set the dirty bit in the first level (1 MiB) dirty bit table
+    Bit64u qword_l1 = dirty_addr / (1024 * 1024 * 64);
+    Bit64u bit_l1   = (dirty_addr / (1024 * 1024)) % 64;
+    dirty_bits_l1[qword_l1] |= 1ULL << bit_l1;
+
+    // Set the dirty bit in the second level (4 KiB) dirty bit table
+    Bit64u qword_l2 = dirty_addr / (4096 * 64);
+    Bit64u bit_l2   = (dirty_addr / 4096) % 64;
+    dirty_bits_l2[qword_l2] |= 1ULL << bit_l2;
+  }
+#endif
+
   // Note: accesses should always be contained within a single page
   if ((addr>>12) != ((addr+len-1)>>12)) {
     BX_PANIC(("writePhysicalPage: cross page access at address 0x" FMT_PHY_ADDRX ", len=%d", addr, len));

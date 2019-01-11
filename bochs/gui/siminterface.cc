@@ -1345,6 +1345,15 @@ bx_bool bx_real_sim_c::restore_hardware()
   bx_list_c *sr_list = get_bochs_root();
   int ndev = sr_list->get_size();
   for (int dev=0; dev<ndev; dev++) {
+#ifdef BOCHSERVISOR
+    // We restore memory by mmaping the original memory file as CoW. Thus we
+    // don't need to restore any memory information from Bochs's normal memory
+    // state
+    if(!strcmp(sr_list->get(dev)->get_name(), "memory")) {
+      printf("Bypassing restore of memory in Bochs, using custom restore\n");
+    }
+#endif
+
     if (!restore_bochs_param(sr_list, get_param_string(BXPN_RESTORE_PATH)->getptr(), sr_list->get(dev)->get_name()))
       return 0;
   }

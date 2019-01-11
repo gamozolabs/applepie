@@ -25,6 +25,8 @@
 #if BX_USE_WIN32CONFIG
 #include "gui/win32dialog.h"
 #endif
+
+#define NEED_CPU_REG_SHORTCUTS 1
 #include "cpu/cpu.h"
 #include "iodev/iodev.h"
 
@@ -279,6 +281,695 @@ void print_statistics_tree(bx_param_c *node, int level)
   }
 }
 #endif
+
+#ifdef BOCHSERVISOR
+
+#include <WinHvPlatform.h>
+
+// Big context stucture. This must stay in sync with the Rust version as this
+// is passed between FFI boundaries
+__declspec(align(64))
+struct _whvp_context {
+  WHV_REGISTER_VALUE rax;
+  WHV_REGISTER_VALUE rcx;
+  WHV_REGISTER_VALUE rdx;
+  WHV_REGISTER_VALUE rbx;
+  WHV_REGISTER_VALUE rsp;
+  WHV_REGISTER_VALUE rbp;
+  WHV_REGISTER_VALUE rsi;
+  WHV_REGISTER_VALUE rdi;
+  WHV_REGISTER_VALUE r8;
+  WHV_REGISTER_VALUE r9;
+  WHV_REGISTER_VALUE r10;
+  WHV_REGISTER_VALUE r11;
+  WHV_REGISTER_VALUE r12;
+  WHV_REGISTER_VALUE r13;
+  WHV_REGISTER_VALUE r14;
+  WHV_REGISTER_VALUE r15;
+  WHV_REGISTER_VALUE rip;
+
+  WHV_REGISTER_VALUE rflags;
+
+  WHV_REGISTER_VALUE es;
+  WHV_REGISTER_VALUE cs;
+  WHV_REGISTER_VALUE ss;
+  WHV_REGISTER_VALUE ds;
+  WHV_REGISTER_VALUE fs;
+  WHV_REGISTER_VALUE gs;
+
+  WHV_REGISTER_VALUE ldtr;
+  WHV_REGISTER_VALUE tr;
+  WHV_REGISTER_VALUE idtr;
+  WHV_REGISTER_VALUE gdtr;
+
+  WHV_REGISTER_VALUE cr0;
+  WHV_REGISTER_VALUE cr2;
+  WHV_REGISTER_VALUE cr3;
+  WHV_REGISTER_VALUE cr4;
+  WHV_REGISTER_VALUE cr8;
+
+  WHV_REGISTER_VALUE dr0;
+  WHV_REGISTER_VALUE dr1;
+  WHV_REGISTER_VALUE dr2;
+  WHV_REGISTER_VALUE dr3;
+  WHV_REGISTER_VALUE dr6;
+  WHV_REGISTER_VALUE dr7;
+
+  WHV_REGISTER_VALUE xmm0;
+  WHV_REGISTER_VALUE xmm1;
+  WHV_REGISTER_VALUE xmm2;
+  WHV_REGISTER_VALUE xmm3;
+  WHV_REGISTER_VALUE xmm4;
+  WHV_REGISTER_VALUE xmm5;
+  WHV_REGISTER_VALUE xmm6;
+  WHV_REGISTER_VALUE xmm7;
+  WHV_REGISTER_VALUE xmm8;
+  WHV_REGISTER_VALUE xmm9;
+  WHV_REGISTER_VALUE xmm10;
+  WHV_REGISTER_VALUE xmm11;
+  WHV_REGISTER_VALUE xmm12;
+  WHV_REGISTER_VALUE xmm13;
+  WHV_REGISTER_VALUE xmm14;
+  WHV_REGISTER_VALUE xmm15;
+
+  WHV_REGISTER_VALUE st0;
+  WHV_REGISTER_VALUE st1;
+  WHV_REGISTER_VALUE st2;
+  WHV_REGISTER_VALUE st3;
+  WHV_REGISTER_VALUE st4;
+  WHV_REGISTER_VALUE st5;
+  WHV_REGISTER_VALUE st6;
+  WHV_REGISTER_VALUE st7;
+
+  WHV_REGISTER_VALUE fp_control;
+  WHV_REGISTER_VALUE xmm_control;
+
+  WHV_REGISTER_VALUE tsc;
+  WHV_REGISTER_VALUE efer;
+  WHV_REGISTER_VALUE kernel_gs_base;
+  WHV_REGISTER_VALUE apic_base;
+  WHV_REGISTER_VALUE pat;
+  WHV_REGISTER_VALUE sysenter_cs;
+  WHV_REGISTER_VALUE sysenter_eip;
+  WHV_REGISTER_VALUE sysenter_esp;
+  WHV_REGISTER_VALUE star;
+  WHV_REGISTER_VALUE lstar;
+  WHV_REGISTER_VALUE cstar;
+  WHV_REGISTER_VALUE sfmask;
+
+  WHV_REGISTER_VALUE tsc_aux;
+  //WHV_REGISTER_VALUE spec_ctrl;
+  //WHV_REGISTER_VALUE pred_cmd;
+  //WHV_REGISTER_VALUE apic_id;
+  //WHV_REGISTER_VALUE apic_version;
+  //WHV_REGISTER_VALUE pending_interruption;
+  //WHV_REGISTER_VALUE interrupt_state;
+  //WHV_REGISTER_VALUE pending_event;
+  //WHV_REGISTER_VALUE deliverability_notifications;
+  //WHV_REGISTER_VALUE internal_activity_state;
+
+  WHV_REGISTER_VALUE xcr0;
+};
+
+// First level of dirty bits. Each bit represents a 1 MiB region of memory
+Bit64u dirty_bits_l1[(4ULL * 1024 * 1024 * 1024) / (1024 * 1024 * 64)] = { 0 };
+
+// Second level of dirty bits. Each bit represents a 4 KiB region of memory
+Bit64u dirty_bits_l2[(4ULL * 1024 * 1024 * 1024) / (4096 * 64)] = { 0 };
+
+// Function pointers passed to the Rust DLL for accessing things they need in
+// the Bochs environment
+struct _bochs_routines {
+  void  (*set_context)(const struct _whvp_context*);
+  void  (*get_context)(struct _whvp_context*);
+  void  (*step_device)(Bit64u steps);
+  void  (*step_cpu)(Bit64u steps);
+  void* (*get_memory_backing)(Bit64u address, int type);
+  void  (*cpuid)(Bit32u leaf, Bit32u subleaf, Bit32u *eax,
+    Bit32u *ebx, Bit32u *ecx, Bit32u *edx);
+  void  (*write_msr)(Bit32u index, Bit64u value);
+  void  (*after_restore)(void);
+  void  (*reset_all)(void);
+};
+
+// Write an MSR into Bochs state
+void write_msr(Bit32u index, Bit64u value) {
+  BX_CPU_THIS_PTR wrmsr(index, value);
+}
+
+// Perform a Bochs CPUID and return the result to the caller
+void do_cpuid(Bit32u leaf, Bit32u subleaf, Bit32u *eax,
+    Bit32u *ebx, Bit32u *ecx, Bit32u *edx)
+{
+  struct cpuid_function_t result = { 0 };
+
+  BX_CPU_THIS_PTR cpuid->get_cpuid_leaf(leaf, subleaf, &result);
+
+  *eax = result.eax;
+  *ebx = result.ebx;
+  *ecx = result.ecx;
+  *edx = result.edx;
+}
+
+// Declared below, this is a Bochs function, we did not make any changes to it
+void bx_sr_after_restore_state(void);
+
+// Reset all hardware on the system, this includes the CPU and all devices
+void bochservisor_reset(void) {
+  bx_pc_system.Reset(BX_RESET_HARDWARE);
+}
+
+// Notify devices that their states have been restored. This does things like
+// redraw the screen, register IRQs and memory callbacks, etc
+void bochservisor_after_restore(void) {
+  bx_sr_after_restore_state();
+}
+
+// Set helper for bochs segments
+#define SET_SEGMENT_FULL(name, bochs_seg) \
+  BX_CPU_THIS_PTR set_segment_ar_data(&bochs_seg,\
+    context->name.Segment.Present,\
+    context->name.Segment.Selector,\
+    context->name.Segment.Base,\
+    context->name.Segment.Limit,\
+    context->name.Segment.Attributes);
+
+// Set helper for floating pointer registers
+#define SET_FP_REG(name, bochs_idx) \
+  BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].fraction  = context->name.Fp.Mantissa;\
+  BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp       = context->name.Fp.BiasedExponent;\
+  BX_CPU_THIS_PTR the_i387.st_space[bochs_idx].exp      |= (context->name.Fp.Sign << 15);
+
+// get_memory_backing implementation for Rust which allows Rust to get access to
+// memory backings for certain physical addresses
+void* get_memory_backing(Bit64u address, int type) {
+  return (void*)BX_CPU_THIS_PTR getHostMemAddr(address, type);
+}
+
+// Number of hypervisor context switches. This is used to track the age of
+// icache entries. Allowing us to lazily invalidate icache entries by changing
+// the number of context switches. We only use icache entries that have an age
+// equal to this number. On switches from the hypervisor this number gets
+// incremented, causing these old icache entries to no longer be used.
+// This number starts as a "random" 64-bit value, such that if we miss a place
+// to update the icache->age field, it will fail closed, resulting in the
+// icache entry not being used and the instruction being re-decoded.
+Bit64u hypervisor_context_switches = 0x12ad1fef77be846aULL;
+
+// set_context implementation that allows Rust to provide a new CPU context for
+// Bochs to use internally
+void set_context(const struct _whvp_context* context) {
+  // Update number of context switches, this will cause icache entires to be
+  // flushed conditionally if they are older than this number
+  hypervisor_context_switches++;
+
+  RAX = context->rax.Reg64;
+  RCX = context->rcx.Reg64;
+  RDX = context->rdx.Reg64;
+  RBX = context->rbx.Reg64;
+  RSP = context->rsp.Reg64;
+  BX_CPU_THIS_PTR prev_rsp = context->rsp.Reg64;
+  RBP = context->rbp.Reg64;
+  RSI = context->rsi.Reg64;
+  RDI = context->rdi.Reg64;
+  R8  = context->r8.Reg64;
+  R9  = context->r9.Reg64;
+  R10 = context->r10.Reg64;
+  R11 = context->r11.Reg64;
+  R12 = context->r12.Reg64;
+  R13 = context->r13.Reg64;
+  R14 = context->r14.Reg64;
+  R15 = context->r15.Reg64;
+  RIP = context->rip.Reg64;
+  BX_CPU_THIS_PTR prev_rip = context->rip.Reg64;
+  BX_CPU_THIS_PTR setEFlags(context->rflags.Reg32);
+
+  SET_SEGMENT_FULL(es, BX_CPU_THIS_PTR sregs[BX_SEG_REG_ES]);
+  SET_SEGMENT_FULL(cs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS]);
+  SET_SEGMENT_FULL(ss, BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS]);
+  SET_SEGMENT_FULL(ds, BX_CPU_THIS_PTR sregs[BX_SEG_REG_DS]);
+  SET_SEGMENT_FULL(fs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_FS]);
+  SET_SEGMENT_FULL(gs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_GS]);
+  SET_SEGMENT_FULL(ldtr, BX_CPU_THIS_PTR ldtr);
+  SET_SEGMENT_FULL(tr, BX_CPU_THIS_PTR tr);
+
+  BX_CPU_THIS_PTR idtr.base  = context->idtr.Table.Base;
+  BX_CPU_THIS_PTR idtr.limit = context->idtr.Table.Limit;
+  BX_CPU_THIS_PTR gdtr.base  = context->gdtr.Table.Base;
+  BX_CPU_THIS_PTR gdtr.limit = context->gdtr.Table.Limit;
+
+  BX_CPU_THIS_PTR cr0.set32(context->cr0.Reg32);
+  BX_CPU_THIS_PTR cr2 = context->cr2.Reg64;
+  BX_CPU_THIS_PTR cr3 = context->cr3.Reg64;
+  BX_CPU_THIS_PTR cr4.set32(context->cr4.Reg32);
+  BX_CPU_THIS_PTR lapic.set_tpr((context->cr8.Reg32 & 0xf) << 4);
+
+  BX_CPU_THIS_PTR dr[0] = context->dr0.Reg64;
+  BX_CPU_THIS_PTR dr[1] = context->dr1.Reg64;
+  BX_CPU_THIS_PTR dr[2] = context->dr2.Reg64;
+  BX_CPU_THIS_PTR dr[3] = context->dr3.Reg64;
+  BX_CPU_THIS_PTR dr6.set32(context->dr6.Reg32);
+  BX_CPU_THIS_PTR dr7.set32(context->dr7.Reg32);
+
+  BX_CPU_THIS_PTR xcr0.set32(context->xcr0.Reg32);
+
+  memcpy(BX_READ_XMM_REG(0).xmm_u32, context->xmm0.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(1).xmm_u32, context->xmm1.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(2).xmm_u32, context->xmm2.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(3).xmm_u32, context->xmm3.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(4).xmm_u32, context->xmm4.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(5).xmm_u32, context->xmm5.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(6).xmm_u32, context->xmm6.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(7).xmm_u32, context->xmm7.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(8).xmm_u32, context->xmm8.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(9).xmm_u32, context->xmm9.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(10).xmm_u32, context->xmm10.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(11).xmm_u32, context->xmm11.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(12).xmm_u32, context->xmm12.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(13).xmm_u32, context->xmm13.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(14).xmm_u32, context->xmm14.Reg128.Dword, 16);
+  memcpy(BX_READ_XMM_REG(15).xmm_u32, context->xmm15.Reg128.Dword, 16);
+
+  SET_FP_REG(st0, 0);
+  SET_FP_REG(st1, 1);
+  SET_FP_REG(st2, 2);
+  SET_FP_REG(st3, 3);
+  SET_FP_REG(st4, 4);
+  SET_FP_REG(st5, 5);
+  SET_FP_REG(st6, 6);
+  SET_FP_REG(st7, 7);
+
+  BX_CPU_THIS_PTR the_i387.cwd = context->fp_control.FpControlStatus.FpControl;
+  BX_CPU_THIS_PTR the_i387.swd = context->fp_control.FpControlStatus.FpStatus;
+  BX_CPU_THIS_PTR the_i387.twd = context->fp_control.FpControlStatus.FpTag;
+  BX_CPU_THIS_PTR the_i387.foo = context->fp_control.FpControlStatus.LastFpOp;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    BX_CPU_THIS_PTR the_i387.fip = context->fp_control.FpControlStatus.LastFpRip;
+  } else {
+    // Other mode state
+    BX_CPU_THIS_PTR the_i387.fip = context->fp_control.FpControlStatus.LastFpEip;
+    BX_CPU_THIS_PTR the_i387.fcs = context->fp_control.FpControlStatus.LastFpCs;
+  }
+
+  BX_CPU_THIS_PTR mxcsr.mxcsr = context->xmm_control.XmmControlStatus.XmmStatusControl;
+  BX_CPU_THIS_PTR mxcsr_mask  = context->xmm_control.XmmControlStatus.XmmStatusControlMask;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    BX_CPU_THIS_PTR the_i387.fdp = context->xmm_control.XmmControlStatus.LastFpRdp;
+  } else {
+    // Other mode state
+    BX_CPU_THIS_PTR the_i387.fdp = context->xmm_control.XmmControlStatus.LastFpDp;
+    BX_CPU_THIS_PTR the_i387.fds = context->xmm_control.XmmControlStatus.LastFpDs;
+  }
+
+  BX_CPU_THIS_PTR set_TSC(context->tsc.Reg64);
+  BX_CPU_THIS_PTR efer.set32(context->efer.Reg32);
+  BX_CPU_THIS_PTR msr.kernelgsbase = context->kernel_gs_base.Reg64;
+  BX_CPU_THIS_PTR msr.apicbase = context->apic_base.Reg64;
+  BX_CPU_THIS_PTR msr.pat._u64 = context->pat.Reg64;
+  BX_CPU_THIS_PTR msr.sysenter_cs_msr = context->sysenter_cs.Reg32;
+  BX_CPU_THIS_PTR msr.sysenter_eip_msr = context->sysenter_eip.Reg64;
+  BX_CPU_THIS_PTR msr.sysenter_esp_msr = context->sysenter_esp.Reg64;
+  BX_CPU_THIS_PTR msr.star = context->star.Reg64;
+  BX_CPU_THIS_PTR msr.lstar = context->lstar.Reg64;
+  BX_CPU_THIS_PTR msr.cstar = context->cstar.Reg64;
+  BX_CPU_THIS_PTR msr.fmask = context->sfmask.Reg32;
+  BX_CPU_THIS_PTR msr.tsc_aux = context->tsc_aux.Reg32;
+
+  // The next few lines are taken from the mov cr0 implementation and attempt
+  // to make sure Bochs updates internal state depending on if mode changes
+  // occured from the newly commit register state
+
+  // Flush TLBs, this also resets stack and prefetch cache
+  BX_CPU_THIS_PTR TLB_flush();
+
+#if BX_CPU_LEVEL >= 4
+  BX_CPU_THIS_PTR handleAlignmentCheck(/* CR0.AC reloaded */);
+#endif
+
+  BX_CPU_THIS_PTR handleCpuModeChange();
+
+#if BX_CPU_LEVEL >= 6
+  BX_CPU_THIS_PTR handleSseModeChange();
+#if BX_SUPPORT_AVX
+  BX_CPU_THIS_PTR handleAvxModeChange();
+#endif
+#endif
+}
+
+// Segment getter helper
+#define GET_SEGMENT_FULL(name, bochs_seg) \
+  context->name.Segment.Base       = bochs_seg.cache.u.segment.base;\
+  context->name.Segment.Limit      = bochs_seg.cache.u.segment.limit_scaled;\
+  context->name.Segment.Selector   = bochs_seg.selector.value;\
+  context->name.Segment.Attributes = (BX_CPU_THIS_PTR get_descriptor_h(&bochs_seg.cache) >> 8) & 0xffff;
+
+// Floating point register value getter
+#define GET_FP_REG(name, bochs_idx) \
+  context->name.Fp.Mantissa       = BX_READ_FPU_REG(bochs_idx).fraction;\
+  context->name.Fp.BiasedExponent = BX_READ_FPU_REG(bochs_idx).exp & 0x7fff;\
+  context->name.Fp.Sign           = (BX_READ_FPU_REG(bochs_idx).exp >> 15) & 1;
+
+// get_context implementation to allow Rust to get access to all of the CPU
+// state internal to Bochs
+void get_context(struct _whvp_context* context) {
+  context->rax.Reg64 = RAX;
+  context->rcx.Reg64 = RCX;
+  context->rdx.Reg64 = RDX;
+  context->rbx.Reg64 = RBX;
+  context->rsp.Reg64 = RSP;
+  context->rbp.Reg64 = RBP;
+  context->rsi.Reg64 = RSI;
+  context->rdi.Reg64 = RDI;
+  context->r8.Reg64  = R8;
+  context->r9.Reg64  = R9;
+  context->r10.Reg64 = R10;
+  context->r11.Reg64 = R11;
+  context->r12.Reg64 = R12;
+  context->r13.Reg64 = R13;
+  context->r14.Reg64 = R14;
+  context->r15.Reg64 = R15;
+  context->rip.Reg64 = RIP;
+  context->rflags.Reg64 = BX_CPU_THIS_PTR read_eflags();
+
+  GET_SEGMENT_FULL(es, BX_CPU_THIS_PTR sregs[BX_SEG_REG_ES]);
+  GET_SEGMENT_FULL(cs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS]);
+  GET_SEGMENT_FULL(ss, BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS]);
+  GET_SEGMENT_FULL(ds, BX_CPU_THIS_PTR sregs[BX_SEG_REG_DS]);
+  GET_SEGMENT_FULL(fs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_FS]);
+  GET_SEGMENT_FULL(gs, BX_CPU_THIS_PTR sregs[BX_SEG_REG_GS]);
+
+  GET_SEGMENT_FULL(ldtr, BX_CPU_THIS_PTR ldtr);
+  GET_SEGMENT_FULL(tr, BX_CPU_THIS_PTR tr);
+  context->idtr.Table.Base  = BX_CPU_THIS_PTR idtr.base;
+  context->idtr.Table.Limit = BX_CPU_THIS_PTR idtr.limit;
+  context->gdtr.Table.Base  = BX_CPU_THIS_PTR gdtr.base;
+  context->gdtr.Table.Limit = BX_CPU_THIS_PTR gdtr.limit;
+
+  context->cr0.Reg64 = BX_CPU_THIS_PTR cr0.get32();
+  context->cr2.Reg64 = BX_CPU_THIS_PTR cr2;
+  context->cr3.Reg64 = BX_CPU_THIS_PTR cr3;
+  context->cr4.Reg64 = BX_CPU_THIS_PTR cr4.get32();
+  context->cr8.Reg64 = BX_CPU_THIS_PTR get_cr8();
+
+  context->dr0.Reg64 = BX_CPU_THIS_PTR dr[0];
+  context->dr1.Reg64 = BX_CPU_THIS_PTR dr[1];
+  context->dr2.Reg64 = BX_CPU_THIS_PTR dr[2];
+  context->dr3.Reg64 = BX_CPU_THIS_PTR dr[3];
+  context->dr6.Reg64 = BX_CPU_THIS_PTR dr6.get32();
+  context->dr7.Reg64 = BX_CPU_THIS_PTR dr7.get32();
+
+  context->xcr0.Reg64 = BX_CPU_THIS_PTR xcr0.get32();
+
+  memcpy(context->xmm0.Reg128.Dword, BX_READ_XMM_REG(0).xmm_u32, 16);
+  memcpy(context->xmm1.Reg128.Dword, BX_READ_XMM_REG(1).xmm_u32, 16);
+  memcpy(context->xmm2.Reg128.Dword, BX_READ_XMM_REG(2).xmm_u32, 16);
+  memcpy(context->xmm3.Reg128.Dword, BX_READ_XMM_REG(3).xmm_u32, 16);
+  memcpy(context->xmm4.Reg128.Dword, BX_READ_XMM_REG(4).xmm_u32, 16);
+  memcpy(context->xmm5.Reg128.Dword, BX_READ_XMM_REG(5).xmm_u32, 16);
+  memcpy(context->xmm6.Reg128.Dword, BX_READ_XMM_REG(6).xmm_u32, 16);
+  memcpy(context->xmm7.Reg128.Dword, BX_READ_XMM_REG(7).xmm_u32, 16);
+  memcpy(context->xmm8.Reg128.Dword, BX_READ_XMM_REG(8).xmm_u32, 16);
+  memcpy(context->xmm9.Reg128.Dword, BX_READ_XMM_REG(9).xmm_u32, 16);
+  memcpy(context->xmm10.Reg128.Dword, BX_READ_XMM_REG(10).xmm_u32, 16);
+  memcpy(context->xmm11.Reg128.Dword, BX_READ_XMM_REG(11).xmm_u32, 16);
+  memcpy(context->xmm12.Reg128.Dword, BX_READ_XMM_REG(12).xmm_u32, 16);
+  memcpy(context->xmm13.Reg128.Dword, BX_READ_XMM_REG(13).xmm_u32, 16);
+  memcpy(context->xmm14.Reg128.Dword, BX_READ_XMM_REG(14).xmm_u32, 16);
+  memcpy(context->xmm15.Reg128.Dword, BX_READ_XMM_REG(15).xmm_u32, 16);
+
+  GET_FP_REG(st0, 0);
+  GET_FP_REG(st1, 1);
+  GET_FP_REG(st2, 2);
+  GET_FP_REG(st3, 3);
+  GET_FP_REG(st4, 4);
+  GET_FP_REG(st5, 5);
+  GET_FP_REG(st6, 6);
+  GET_FP_REG(st7, 7);
+
+  context->fp_control.FpControlStatus.FpControl = BX_CPU_THIS_PTR the_i387.get_control_word();
+  context->fp_control.FpControlStatus.FpStatus  = BX_CPU_THIS_PTR the_i387.get_status_word();
+  context->fp_control.FpControlStatus.FpTag     = (Bit8u)BX_CPU_THIS_PTR the_i387.get_tag_word();
+  context->fp_control.FpControlStatus.LastFpOp  = BX_CPU_THIS_PTR the_i387.foo;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    context->fp_control.FpControlStatus.LastFpRip = BX_CPU_THIS_PTR the_i387.fip;
+  } else {
+    // Other mode state
+    context->fp_control.FpControlStatus.LastFpEip = (Bit32u)BX_CPU_THIS_PTR the_i387.fip;
+    context->fp_control.FpControlStatus.LastFpCs  = BX_CPU_THIS_PTR the_i387.fcs;
+  }
+
+  context->xmm_control.XmmControlStatus.XmmStatusControl     = BX_CPU_THIS_PTR mxcsr.mxcsr;
+  context->xmm_control.XmmControlStatus.XmmStatusControlMask = BX_CPU_THIS_PTR mxcsr_mask;
+
+  if(BX_CPU_THIS_PTR efer.get_LMA()) {
+    // Long mode state
+    context->xmm_control.XmmControlStatus.LastFpRdp = BX_CPU_THIS_PTR the_i387.fdp;
+  } else {
+    // Other mode state
+    context->xmm_control.XmmControlStatus.LastFpDp = (Bit32u)BX_CPU_THIS_PTR the_i387.fdp;
+    context->xmm_control.XmmControlStatus.LastFpDs  = BX_CPU_THIS_PTR the_i387.fds;
+  }
+
+  context->tsc.Reg64  = BX_CPU_THIS_PTR get_TSC();
+  context->efer.Reg64 = BX_CPU_THIS_PTR efer.get32();
+  context->kernel_gs_base.Reg64 = BX_CPU_THIS_PTR msr.kernelgsbase;
+  context->apic_base.Reg64 = BX_CPU_THIS_PTR msr.apicbase;
+  context->pat.Reg64 = BX_CPU_THIS_PTR msr.pat._u64;
+  context->sysenter_cs.Reg64 = BX_CPU_THIS_PTR msr.sysenter_cs_msr;
+  context->sysenter_eip.Reg64 = BX_CPU_THIS_PTR msr.sysenter_eip_msr;
+  context->sysenter_esp.Reg64 = BX_CPU_THIS_PTR msr.sysenter_esp_msr;
+  context->star.Reg64 = BX_CPU_THIS_PTR msr.star;
+  context->lstar.Reg64 = BX_CPU_THIS_PTR msr.lstar;
+  context->cstar.Reg64 = BX_CPU_THIS_PTR msr.cstar;
+  context->sfmask.Reg64 = BX_CPU_THIS_PTR msr.fmask;
+  context->tsc_aux.Reg64 = BX_CPU_THIS_PTR msr.tsc_aux;
+}
+
+// step_cpu() implementation which allows Rust to run a certain amount of
+// instructions (or chains with optimizations on).
+//
+// This code is nearly directly copied and pasted from the actual Bochs CPU
+// loop
+void step_cpu(Bit64u steps) {
+  // Flush TLBs, this also resets stack and prefetch cache
+  // We do this here to make sure our dirty bits get updated. If TLBs are
+  // present it's possible to execute in the emulator and skip the call to
+  // write physical memory which would cause us to miss setting dirty bits.
+  BX_CPU_THIS_PTR TLB_flush();
+
+  // Step while we have steps... duh
+  while(steps) {
+    // Completed a step
+    steps--;
+    
+    // check on events which occurred for previous instructions (traps)
+    // and ones which are asynchronous to the CPU (hardware interrupts)
+    if (BX_CPU_THIS_PTR async_event) {
+      if (BX_CPU_THIS_PTR handleAsyncEvent()) {
+        // If request to return to caller ASAP.
+        return;
+      }
+    }
+
+    bxICacheEntry_c *entry = BX_CPU_THIS_PTR getICacheEntry();
+    bxInstruction_c *i = entry->i;
+
+#if BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS
+    {
+      // want to allow changing of the instruction inside instrumentation callback
+      BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
+      RIP += i->ilen();
+      // when handlers chaining is enabled this single call will execute entire trace
+      BX_CPU_CALL_METHOD(i->execute1, (i)); // might iterate repeat instruction
+      BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
+
+      if (BX_CPU_THIS_PTR async_event) continue;
+
+      i = BX_CPU_THIS_PTR getICacheEntry()->i;
+    }
+#else // BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
+
+    bxInstruction_c *last = i + (entry->tlen);
+
+    {
+
+#if BX_DEBUGGER
+      if (BX_CPU_THIS_PTR trace)
+        debug_disasm_instruction(BX_CPU_THIS_PTR prev_rip);
+#endif
+
+      // want to allow changing of the instruction inside instrumentation callback
+      BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
+      RIP += i->ilen();
+      BX_CPU_CALL_METHOD(i->execute1, (i)); // might iterate repeat instruction
+      BX_CPU_THIS_PTR prev_rip = RIP; // commit new RIP
+      BX_INSTR_AFTER_EXECUTION(BX_CPU_ID, i);
+      BX_CPU_THIS_PTR icount++;
+
+      BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
+
+      // note instructions generating exceptions never reach this point
+#if BX_DEBUGGER || BX_GDBSTUB
+      if (dbg_instruction_epilog()) return;
+#endif
+
+      if (BX_CPU_THIS_PTR async_event) continue;
+
+      if (++i == last) {
+        entry = BX_CPU_THIS_PTR getICacheEntry();
+        i = entry->i;
+        last = i + (entry->tlen);
+      }
+    }
+#endif
+
+    // clear stop trace magic indication that probably was set by repeat or branch32/64
+    BX_CPU_THIS_PTR async_event &= ~BX_ASYNC_EVENT_STOP_TRACE;
+  }
+}
+
+// step_device() implementation. This steps the device and time emulation in
+// Bochs. This is used very frequently to make sure things like timer interrupts
+// are delivered to the guest.
+void step_device(Bit64u steps) {
+  // Flush TLBs, this also resets stack and prefetch cache
+  // We do this here to make sure our dirty bits get updated. If TLBs are
+  // present it's possible to execute in the emulator and skip the call to
+  // write physical memory which would cause us to miss setting dirty bits.
+  BX_CPU_THIS_PTR TLB_flush();
+
+  while(steps) {
+    // Check for async events and handle them if there are any
+    if (BX_CPU_THIS_PTR async_event) {
+      if (BX_CPU_THIS_PTR handleAsyncEvent()) {
+        // If request to return to caller ASAP.
+        return;
+      }
+    }
+
+    // We actually tick one at a time even though we could tick in bulk. This
+    // allows us to check for async events more frequently and it makes for a
+    // lower latency hypervisor experience. This could be tweaked higher for
+    // more performance, at the cost of usability.
+    //
+    // Tuning this further might cause interrupts to get queued up without being
+    // handled so it could actually potentially cause corruption in the guest.
+    // Be careful changing things like this.
+    bx_pc_system.tickn(1);
+    steps--;
+  }
+}
+
+// Routines passed to Rust
+struct _bochs_routines routines = { 0 };
+
+// Cached address of the Rust routine to call instead of the normal CPU loop
+void (*bochs_cpu_loop)(struct _bochs_routines*, Bit64u, void*, void*, void*, void*) = NULL;
+
+// Cached address of the Rust code coverage callback
+void (*report_coverage)(Bit64u, int, Bit64u, Bit16u, Bit64u) = NULL;
+
+// Cached address of the Rust device state registration callback
+// Type is an enum from `enum _shadow_type` in paramtree.cc
+void (*register_state)(const char *name, const char *label, void *data, size_t size, int type) = NULL;
+
+// Set up everything for bochservisor, including loading the bochservisor DLL
+// and validating config options are set as expected
+void initialize_bochservisor()
+{
+  static int initialized = 0;
+
+  BX_CPU_THIS_PTR cr3;
+
+  if(initialized) {
+    fprintf(stderr, "initialize_bochservisor() got called twice!?\n");
+    exit(-1);
+  }
+  initialized = 1;
+
+  // Enforce IPS is what we expect
+  Bit64u ips = SIM->get_param_num(BXPN_IPS)->get();
+  if(ips != 1000000) {
+    fprintf(stderr, "Bochservisor requires ips=1000000 in your bochsrc!\n");
+    exit(-1);
+  }
+
+  // Make sure we're using a Skylake. This is designed to be a superset of
+  // whatever our hypervisor reports for CPUID.
+  unsigned cpu_model = SIM->get_param_enum(BXPN_CPU_MODEL)->get();
+  if(!cpu_model || strcmp(SIM->get_param_enum(BXPN_CPU_MODEL)->get_selected(), "corei7_skylake_x")) {
+    fprintf(stderr, "Bochservisor requires corei7_skylake_x cpu model!\n");
+    exit(-1);
+  }
+
+  // We only support single core right now, enforce that
+  Bit64u procs   = SIM->get_param_num(BXPN_CPU_NPROCESSORS)->get();
+  Bit64u cores   = SIM->get_param_num(BXPN_CPU_NCORES)->get();
+  Bit64u threads = SIM->get_param_num(BXPN_CPU_NTHREADS)->get();
+  if(procs != 1 || cores != 1 || threads != 1) {
+    fprintf(stderr, "Bochservisor requires procs=cores=threads=1 in your bochsrc!\n");
+    exit(-1);
+  }
+
+  // Make sure clock syncing is set to none
+  int clock_sync = SIM->get_param_enum(BXPN_CLOCK_SYNC)->get();
+  if(clock_sync != BX_CLOCK_SYNC_NONE) {
+    fprintf(stderr, "Bochservisor requires clock: sync=none in your bochsrc!\n");
+    exit(-1);
+  }
+
+  // Load the bochservisor DLL
+  HMODULE module = LoadLibrary("..\\bochservisor\\target\\release\\bochservisor.dll");
+  if(!module) {
+    fprintf(stderr, "LoadLibrary() error : %d\n", GetLastError());
+    exit(-1);
+  }
+
+  // Configure the routines to hand to Rust for manipulating Bochs
+  routines.set_context        = set_context;
+  routines.get_context        = get_context;
+  routines.step_device        = step_device;
+  routines.step_cpu           = step_cpu;
+  routines.get_memory_backing = get_memory_backing;
+  routines.cpuid              = do_cpuid;
+  routines.write_msr          = write_msr;
+  routines.after_restore      = bochservisor_after_restore;
+  routines.reset_all          = bochservisor_reset;
+
+  // Lookup the address of the Rust CPU look implementation in the DLL
+  bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u, void*, void*, void*, void*))
+    GetProcAddress(module, "bochs_cpu_loop");
+  if(!bochs_cpu_loop) {
+    fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
+    exit(-1);
+  }
+
+  // Lookup the address of the Rust coverage reporting routine
+  report_coverage = (void (*)(Bit64u, int, Bit64u, Bit16u, Bit64u))
+    GetProcAddress(module, "report_coverage");
+  if(!report_coverage) {
+    fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
+    exit(-1);
+  }
+
+  // Lookup the address of the routine to call in Rust to notify that we
+  // have more device state to report
+  register_state = (void (*)(const char *name, const char *label, void *data, size_t size, int type))
+    GetProcAddress(module, "register_state");
+  if(!register_state) {
+    fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());
+    exit(-1);
+  }
+
+  printf("Bochservisor initialized!\n");
+}
+#endif // #ifdef BOCHSERVISOR
 
 int bxmain(void)
 {
@@ -971,6 +1662,11 @@ int bx_begin_simulation(int argc, char *argv[])
     // make sure all optional plugins have been loaded
     SIM->opt_plugin_ctrl("*", 1);
   }
+
+#ifdef BOCHSERVISOR
+  // At this point the config is parsed, initialize bochservisor
+  initialize_bochservisor();
+#endif
 
   // deal with gui selection
   if (!load_and_init_display_lib()) {

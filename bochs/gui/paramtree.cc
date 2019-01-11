@@ -23,6 +23,62 @@
 #include "bochs.h"
 #include "paramtree.h"
 
+#ifdef BOCHSERVISOR
+
+// Types for all shadow data types used in snapshots
+enum _shadow_type {
+  APST_DATA,    // bx_shadow_data_c, raw data pointer and a size
+  APST_FILEPTR, // bx_shadow_filedata_c, FILE**
+  APST_BIT64S,  // bx_shadow_num_c int64_t
+  APST_BIT64U,  // bx_shadow_num_c uint64_t
+  APST_BIT32S,  // bx_shadow_num_c int32_t
+  APST_BIT32U,  // bx_shadow_num_c uint32_t
+  APST_BIT16S,  // bx_shadow_num_c int16_t
+  APST_BIT16U,  // bx_shadow_num_c uint16_t
+  APST_BIT8S,   // bx_shadow_num_c int8_t
+  APST_BIT8U,   // bx_shadow_num_c uint8_t
+  APST_FLOAT,   // bx_shadow_num_c float
+  APST_DOUBLE,  // bx_shadow_num_c double
+  APST_BOOL,    // bx_shadow_bool_c bool
+};
+
+// Notify Rust of the new device state
+void applepie_register_state(bx_param_c *parent, const char *name, const char *label, void *data, size_t size, enum _shadow_type type) {
+  extern void (*register_state)(const char *name, const char *label, void *data, size_t size, int type);
+
+  char fullname[1024] = { 0 };
+
+  // Start with the name
+  int written = snprintf(fullname, sizeof(fullname), "%s", name);
+  size_t offset = written;
+  if(written <= 0 || offset >= (sizeof(fullname) - 1)) {
+    fprintf(stderr, "Buffer overflow in applepie_register_state");
+    exit(-1);
+  }
+
+  // For every parent add the name
+  while(parent) {
+    written = snprintf(fullname + offset, sizeof(fullname) - offset,
+      ".%s", parent->get_name());
+    offset += written;
+    if(written <= 0 || offset >= (sizeof(fullname) - 1)) {
+      fprintf(stderr, "Buffer overflow in applepie_register_state");
+      exit(-1);
+    }
+
+    // Go up the list, getting the parent
+    parent = parent->get_parent();
+  }
+
+  // Now `fullname` is a reverse Bochs string like:
+  // total_bytes_remaining.atapi.drive1.0.hard_drive.bochs.bochs
+
+  // Notify Rust of this new device state
+  (*register_state)(fullname, label, data, size, type);
+}
+
+#endif
+
 /////////////////////////////////////////////////////////////////////////
 // define methods of bx_param_* and family
 /////////////////////////////////////////////////////////////////////////
@@ -362,6 +418,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT64S, BX_MAX_BIT64S, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit64s), APST_BIT64S);
+#endif
+
   this->varsize = 64;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT64S >> (63 - (highbit - lowbit))) << lowbit);
@@ -381,6 +441,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT64U, BX_MAX_BIT64U, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit64u), APST_BIT64U);
+#endif
+
   this->varsize = 64;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT64U >> (63 - (highbit - lowbit))) << lowbit);
@@ -400,6 +464,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT32S, BX_MAX_BIT32S, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit32s), APST_BIT32S);
+#endif
+
   this->varsize = 32;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT32S >> (31 - (highbit - lowbit))) << lowbit);
@@ -419,6 +487,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT32U, BX_MAX_BIT32U, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit32u), APST_BIT32U);
+#endif
+
   this->varsize = 32;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT32U >> (31 - (highbit - lowbit))) << lowbit);
@@ -438,6 +510,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT16S, BX_MAX_BIT16S, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit16s), APST_BIT16S);
+#endif
+  
   this->varsize = 16;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT16S >> (15 - (highbit - lowbit))) << lowbit);
@@ -457,6 +533,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT16U, BX_MAX_BIT16U, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit16u), APST_BIT16U);
+#endif
+
   this->varsize = 16;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT16U >> (15 - (highbit - lowbit))) << lowbit);
@@ -476,6 +556,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT8S, BX_MAX_BIT8S, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit8s), APST_BIT8S);
+#endif
+
   this->varsize = 8;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT8S >> (7 - (highbit - lowbit))) << lowbit);
@@ -496,6 +580,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     Bit8u lowbit)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT8U, BX_MAX_BIT8U, *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(Bit8u), APST_BIT8U);
+#endif
+
   this->varsize = 8;
   this->lowbit = lowbit;
   this->mask = ((BX_MAX_BIT8U >> (7 - (highbit - lowbit))) << lowbit);
@@ -512,6 +600,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     float *ptr_to_real_val)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT64U, BX_MAX_BIT64U, 0, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(float), APST_FLOAT);
+#endif
+
   this->varsize = 32;
   this->lowbit = 0;
   this->mask = BX_MAX_BIT32U;
@@ -525,6 +617,10 @@ bx_shadow_num_c::bx_shadow_num_c(bx_param_c *parent,
     double *ptr_to_real_val)
 : bx_param_num_c(parent, name, NULL, NULL, BX_MIN_BIT64U, BX_MAX_BIT64U, 0, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(double), APST_DOUBLE);
+#endif
+
   this->varsize = 64;
   this->lowbit = 0;
   this->mask = BX_MAX_BIT64U;
@@ -635,6 +731,10 @@ bx_shadow_bool_c::bx_shadow_bool_c(bx_param_c *parent,
       Bit8u bitnum)
   : bx_param_bool_c(parent, name, label, NULL, (Bit64s) *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, label, (void*)ptr_to_real_val, sizeof(bx_bool), APST_BOOL);
+#endif
+
   val.pbool = ptr_to_real_val;
   this->bitnum = bitnum;
 }
@@ -645,6 +745,10 @@ bx_shadow_bool_c::bx_shadow_bool_c(bx_param_c *parent,
       Bit8u bitnum)
   : bx_param_bool_c(parent, name, NULL, NULL, (Bit64s) *ptr_to_real_val, 1)
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_real_val, sizeof(bx_bool), APST_BOOL);
+#endif
+
   val.pbool = ptr_to_real_val;
   this->bitnum = bitnum;
 }
@@ -1061,6 +1165,10 @@ bx_shadow_data_c::bx_shadow_data_c(bx_param_c *parent,
     bx_bool is_text)
   : bx_param_c(SIM->gen_param_id(), name, "")
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)ptr_to_data, (size_t)data_size, APST_DATA);
+#endif
+  
   set_type(BXT_PARAM_DATA);
   this->data_ptr = ptr_to_data;
   this->data_size = data_size;
@@ -1092,6 +1200,10 @@ bx_shadow_filedata_c::bx_shadow_filedata_c(bx_param_c *parent,
     const char *name, FILE **scratch_file_ptr_ptr)
   : bx_param_c(SIM->gen_param_id(), name, "")
 {
+#ifdef BOCHSERVISOR
+  applepie_register_state(parent, name, NULL, (void*)scratch_file_ptr_ptr, sizeof(scratch_file_ptr_ptr), APST_FILEPTR);
+#endif
+
   set_type(BXT_PARAM_FILEDATA);
   this->scratch_fpp = scratch_file_ptr_ptr;
   this->save_handler = NULL;

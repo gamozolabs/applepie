@@ -7,8 +7,9 @@ pub mod virtmem;
 pub mod win32;
 pub mod symdumper;
 pub mod symloader;
+pub mod disk;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap};
 use crate::whvp::{Whvp, WhvpContext};
 use crate::whvp::{PERM_READ, PERM_WRITE, PERM_EXECUTE};
@@ -25,7 +26,7 @@ const EMULATE_STEPS: u64 = 250;
 
 /// Disables coverage entirely if this is `true`
 /// This helps a lot with performance if you're not concerned with coverage info
-const COVERAGE_DISABLE: bool = false;
+const COVERAGE_DISABLE: bool = true;
 
 /// Logs coverage using symbols to the file `coverage.txt`.
 const LOG_COVERAGE_SYMBOLS: bool = false;
@@ -73,6 +74,13 @@ pub struct BochsRoutines {
 
     /// Write an MSR `value` to the MSR specified by `index`
     write_msr: extern fn(index: u32, value: u64),
+
+    /// Notify devices that a restore just occured. This does things like
+    /// redraw the screen, check CPU state is valid, and such.
+    after_restore: extern fn(),
+
+    /// Reset all devices and CPUs in Bochs
+    reset_all: extern fn(),
 }
 
 /// Named structure for tracking memory regions in Bochs
@@ -468,7 +476,111 @@ fn dump_coverage(coverage: &Vec<Option<CoverageEntry>>) {
     print!("Coverage total:              {:10}\n", sum);
 }
 
+/// Types for all shadow data types used in snapshots
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub enum ShadowType {
+  Data,    // bx_shadow_data_c, raw data pointer and a size
+  Fileptr, // bx_shadow_filedata_c, FILE**
+  Bit64s,  // bx_shadow_num_c int64_t
+  Bit64u,  // bx_shadow_num_c uint64_t
+  Bit32s,  // bx_shadow_num_c int32_t
+  Bit32u,  // bx_shadow_num_c uint32_t
+  Bit16s,  // bx_shadow_num_c int16_t
+  Bit16u,  // bx_shadow_num_c uint16_t
+  Bit8s,   // bx_shadow_num_c int8_t
+  Bit8u,   // bx_shadow_num_c uint8_t
+  Float,   // bx_shadow_num_c float
+  Double,  // bx_shadow_num_c double
+  Bool,    // bx_shadow_bool_c bool
+}
+
+/// This represents the state of a given device
+struct DeviceState {
+    /// Address to the memory in Bochs which holds this state
+    addr: usize,
+
+    /// Size of the state
+    len: usize,
+
+    /// If set, this is the saved state from the initial execution of the CPU
+    /// loop.
+    /// 
+    /// This is what we restore to during a device restore
+    original: Option<Vec<u8>>,
+}
+
+thread_local! {
+    /// Vector of all the device states in Bochs
+    static DEVICE_STATE: RefCell<Vec<DeviceState>> =
+        RefCell::new(Vec::new());
+
+    /// Determines whether device state lists can be updated
+    /// 
+    /// This is locked when the first call to the Bochs CPU loop is invoked,
+    /// which prevents us from registering new state when running.
+    static DEVICE_STATE_LOCKED: Cell<bool> = Cell::new(false);
+}
+
+/// Convert a null-terminated C string to a Rust string
+unsafe fn string_from_cstring(cstring: *const u8) -> Option<String> {
+    // Kill null pointers
+    if cstring.is_null() { return None; }
+
+    // strlen()
+    let mut length = 0;
+    loop {
+        if *cstring.offset(length as isize) == 0 { break; }
+        length += 1;
+    }
+
+    // Convert it to a Rust string
+    Some(std::str::from_utf8(std::slice::from_raw_parts(cstring, length))
+        .expect("Invalid C string").into())
+}
+
+/// Callback for handling Bochs device state registration. Data is a pointer,
+/// size is a size of the data in bytes, and typ is the type of data.
+/// 
+/// Technically the type doesn't matter as we only care about the raw data
+/// but it's nice to have
 #[no_mangle]
+pub extern "C" fn register_state(name: *const u8, label: *const u8,
+        data: usize, size: usize, _typ: ShadowType) {           
+    // Ensure device state is not locked for editing
+    DEVICE_STATE_LOCKED.with(|locked| {
+        assert!(locked.get() == false, "Device state change during lock")
+    });
+
+    assert!(size > 0, "Tried to register device state with 0 size");
+
+    // Convert the name and label to Rust strings
+    let name   = unsafe { string_from_cstring(name)  };
+    let _label = unsafe { string_from_cstring(label) };
+
+    // We don't track memory here
+    if name == Some("ram.memory.bochs.bochs".into()) {
+        return;
+    }
+
+    // We don't track VRAM here
+    if name == Some("memory.vgacore.vga.bochs.bochs".into()) {
+        return;
+    }
+    
+    // Add this device to the device state list
+    DEVICE_STATE.with(|x| {
+        let mut x = x.borrow_mut();
+
+        // Save it to the list of device state!
+        x.push(DeviceState {
+            addr: data, len: size, original: None
+        });
+    });
+}
+
+#[no_mangle]
+/// Callback for handling coverage events
 pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
         cs: u16, rip: usize) -> bool {
     if COVERAGE_DISABLE { return false; }
@@ -589,13 +701,260 @@ pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
     })
 }
 
+/// Reset all dirty pages in the guest based on the dirty bit L1 and L2 tables
+/// 
+/// This will reset the regions in `memory` which are dirty based on
+/// `dirty_bits_l1` and `dirty_bits_l2` with the original memory contents of
+/// the snapshot `orig_memory`.
+/// 
+/// This also clears the dirty bits as the memory is reset
+pub fn reset_dirty_pages(orig_memory: &[u8], memory: &mut [u8],
+        dirty_bits_l1: &mut [u64], dirty_bits_l2: &mut [u64]) {
+    assert!(orig_memory.len() == memory.len(), "Whoa this should never happen");
+
+    // Go through each qword in the L1 dirty bits
+    for (l1idx, l1ent) in dirty_bits_l1.iter_mut().enumerate() {
+        // Fast path, no dirty bits, skip this entry
+        if *l1ent == 0 { continue; }
+
+        // There is a dirty bit somewhwere in here, find it
+        for l1bit in 0..64 {
+            if *l1ent & (1 << l1bit) != 0 {
+                // Compute the address of this 1 MiB dirty region
+                let dirty_addr = l1idx * 1024 * 1024 * 64 + l1bit * 1024 * 1024;
+
+                // Compute the L2 4 KiB region indicies corresponding to this
+                // range
+                let qword_l2     = dirty_addr / (4096 * 64);
+                let qword_l2_end = (dirty_addr + 1024*1024) / (4096 * 64);
+
+                //print!("Dirty L1 entry {:x}\n", dirty_addr);
+
+                // Go through all the 4 KiB entries for this 1 MiB range
+                for (l2idx, l2ent) in dirty_bits_l2[qword_l2..qword_l2_end]
+                        .iter_mut().enumerate() {
+                    // Make sure this is an absolute index rather than relative
+                    // as we slice the range
+                    let l2idx = l2idx + qword_l2;
+
+                    // Skip ranges with no dirty bits
+                    if *l2ent == 0 { continue; }
+
+                    // Find the set bits in this entry
+                    for l2bit in 0..64 {
+                        if *l2ent & (1 << l2bit) != 0 {
+                            // Compute 4 KiB dirty address
+                            let dirty_addr = l2idx * 4096 * 64 + l2bit * 4096;
+                            //print!("\tDirty L2 entry {:x}\n", dirty_addr);
+
+                            if dirty_addr < orig_memory.len() {
+                                // Actually restore the memory
+                                memory[dirty_addr..dirty_addr + 4096]
+                                    .copy_from_slice(&orig_memory
+                                        [dirty_addr..dirty_addr + 4096]);
+                            }
+                        }
+                    }
+
+                    // Clear dirty bits
+                    *l2ent = 0;
+                }
+            }
+        }
+
+        // Clear dirty bits
+        *l1ent = 0;
+    }
+}
+
+/// Fully restores all CPU, device, and memory states
+/// 
+/// This _may_ leave some devices in an undefined state if things like their
+/// ISR or MMIO BARs are changed. `after_restore` needs to be called to correct
+/// these changes, but we first need to reset all CPU state and memory/IRQ
+/// handlers. This operation is so expensive it's just not feasible.
+/// Hopefully I can find a better way in the future but for now as long as
+/// a PCI device isn't massively reprogrammed during a fuzz case this should be
+/// fine. Further reprogramming of MMIO bases and ISRs usually only happens
+/// during boot of an OS.
+/// 
+/// We also do not restore the VGA buffer at all. It's 16 MiB and causes a huge
+/// slowdown. We also don't really care about the screen state when fuzzing
+fn restore(orig_memory: &[u8], memory: &mut [u8],
+        dirty_bits_l1: &mut [u64], dirty_bits_l2: &mut [u64]) {
+    PERSIST.with(|persist| {
+    DEVICE_STATE.with(|devices| {
+        // Borrow the thread local
+        let mut persist = persist.borrow_mut();
+
+        // Restore all device states
+        for devstate in devices.borrow_mut().iter() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    devstate.original.as_ref().unwrap().as_ptr(),
+                    devstate.addr as *mut u8, devstate.len);
+            }
+        }
+
+        // Update the dirty bitmap from the hypervisor dirty list
+        // Without this we can do about 65,000 restores/second
+        // With this we can only do about 50. This is a huge performance
+        // bottleneck right now and I'm already in an email chain with the
+        // WHVP dev to optimize their dirty list API. I requested to get 10k
+        // per second for querying an empty dirty list. Hopefully we get that :D
+        // I've got some workaround ideas for this
+        persist.hypervisor.as_mut().unwrap().get_dirty_list(
+            dirty_bits_l1, dirty_bits_l2);
+
+        // Restore memory
+        reset_dirty_pages(orig_memory, memory,
+            dirty_bits_l1, dirty_bits_l2);
+
+        // Restore disk
+        disk::vdisk_discard_changes();
+
+        // Update devices. This currently doesn't work as the IRQs get
+        // remapped twice, causing a Bochs panic
+        //(routines.after_restore)();
+    });
+    });
+}
+
+/// Simple benchmark used to see how fast we can reset the VM in a loop
+fn _benchmark_restore(orig_memory: &[u8], memory: &mut [u8],
+        dirty_bits_l1: &mut [u64], dirty_bits_l2: &mut [u64]) {
+    let start = std::time::Instant::now();
+    for iters in 0u64.. {
+        restore(orig_memory, memory, dirty_bits_l1, dirty_bits_l2);
+
+        if (iters & 0xff) == 0 {
+            let delta = time::elapsed_from(&start);
+            if delta >= 5.0 {
+                print!("Iters {:10} in {:10.6} seconds | {:10.2} iters/second\n",
+                    iters,
+                    delta,
+                    (iters as f64) / delta);
+                break;
+            }
+        }
+    }
+}
+
 /// Rust CPU loop for Bochs which uses both emulation and hypervisor for running
 /// a guest
 #[no_mangle]
-pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
+pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64,
+        dirty_bits_l1: usize, dirty_bits_l2: usize, bochs_memory_base: usize,
+        original_memory_base: usize) {
     /// Make sure the physical memory size reported by Bochs is sane
     assert!(pmem_size & 0xfff == 0,
         "Physical memory size was not 4 KiB aligned");
+
+    // Lock further device state registration
+    let first_run = !DEVICE_STATE_LOCKED.with(|locked| locked.replace(true));
+
+    // Get slice into raw physical memory of Bochs
+    let memory = unsafe {
+        std::slice::from_raw_parts_mut(bochs_memory_base as *mut u8,
+            pmem_size as usize)
+    };
+
+    // Get slice of original memory state if we're restoring from a snapshot.
+    // If we're not in snapshot mode this will be `None`.
+    let orig_memory = if original_memory_base > 0 { unsafe {
+        Some(std::slice::from_raw_parts(original_memory_base as *const u8,
+            pmem_size as usize))
+    }} else {
+        None
+    };
+
+    // Get slice to L1 dirty bits
+    let dirty_bits_l1 = unsafe {
+        std::slice::from_raw_parts_mut(dirty_bits_l1 as *mut u64,
+            (4 * 1024 * 1024 * 1024) / (1024 * 1024 * 64))
+    };
+
+    // Get slice to L2 dirty bits
+    let dirty_bits_l2 = unsafe {
+        std::slice::from_raw_parts_mut(dirty_bits_l2 as *mut u64,
+            (4 * 1024 * 1024 * 1024) / (4096 * 64))
+    };
+
+    // If this is the first run and we're in snapshot mode, save all device
+    // state
+    if first_run && orig_memory.is_some() {
+        DEVICE_STATE.with(|x| {
+            let mut x = x.borrow_mut();
+
+            // Print the stats of the device state prior to merging contiguous
+            // regions of device state
+            print!("Device state: {:6} device states totalling {:10} bytes\n",
+                x.len(), x.iter().fold(0usize, |acc, x| acc + x.len));
+
+            // Sort by pointer
+            x.sort_by_key(|x| x.addr);
+            
+            // This should never happen
+            assert!(x.len() > 0, "Whoa, no devices registered!?");
+
+            // Merge contiguous memory regions together
+            let mut ii = 0;
+            while ii < (x.len() - 1) {
+                // If this region directly connects to the next then merge them
+                // to make one larger region
+                if (x[ii].addr + x[ii].len) == x[ii + 1].addr {
+                    // Grow the current region
+                    x[ii].len += x[ii + 1].len;
+
+                    // Remove the region above this
+                    x.remove(ii + 1);
+                    continue;
+                }
+
+                ii += 1;
+            }
+
+            // Validate that there is no overlap in any of the regions
+            for (fi, first) in x.iter().enumerate() {
+                for (si, second) in x.iter().enumerate() {
+                    // Skip direct comparisons
+                    if fi == si { continue; }
+
+                    // Compute overlap, -1 is safe as we never have a 0 sized
+                    // entry
+                    let overlaps = std::cmp::max(first.addr, second.addr) <=
+                        std::cmp::min(first.addr + first.len - 1,
+                            second.addr + second.len - 1);
+
+                    assert!(!overlaps, "Overlap detected in device states");
+                }
+            }
+
+            // Create copy of all the regions and save it off. This is the state
+            // we reset to!
+            for devstate in x.iter_mut() {
+                // Create Rust slice representing the device state
+                let sliced = unsafe {
+                    std::slice::from_raw_parts(
+                        devstate.addr as *const u8, devstate.len)
+                };
+
+                // Create a copy of this device state
+                devstate.original = Some(Vec::from(sliced));
+            }
+
+            // Print the new statistics of the device state after we merged
+            // contiguous device states
+            print!("Reduced to:   {:6} device states totalling {:10} bytes\n",
+                x.len(), x.iter().fold(0usize, |acc, x| acc + x.len));
+        });
+    }
+
+    if orig_memory.is_none() {
+        // If we're not in snapshot mode then the disk is non-volatile and writes
+        // modify the disk
+        disk::vdisk_set_non_volatile();
+    }
 
     /// This is the hardcoded target IPS value we expect bochs to run at
     const TARGET_IPS: f64 = 1000000.0;
@@ -938,6 +1297,16 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64) {
 
             // Update frequency
             *persist.vmexits.get_mut(&vmer).unwrap() += 1;
+
+            if false {
+                std::mem::drop(persist);
+                // Benchmark the restore performance, used for testing while we
+                // improve WHVP dirty performance.
+                // This should be false for all git commits for now
+                _benchmark_restore(orig_memory.as_ref().unwrap(),
+                    memory, dirty_bits_l1, dirty_bits_l2);
+                std::process::exit(-5);
+            }
 
             // Determine the reason the hypervisor exited
             match vmexit.ExitReason {

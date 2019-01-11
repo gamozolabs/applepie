@@ -469,6 +469,14 @@ pub struct Whvp {
     /// Supported xsave features
     /// If xsave is not supported by WHVP this is a `None` value
     xsave_features: Option<WHV_PROCESSOR_XSAVE_FEATURES>,
+
+    /// List of mapped memory regions in the hypervisor
+    /// Tuple is (paddr, size), both size and paddr should be 4 KiB aligned
+    memory_regions: Vec<(usize, usize)>,
+
+    /// Buffer to hold the dirty bitmaps. We just cache this allocation for
+    /// performance
+    dirty_bitmap_tmp: Vec<u64>,
 }
 
 impl Whvp {
@@ -721,6 +729,8 @@ impl Whvp {
             _whvp_features: whvp_features,
             _proc_features: proc_features,
             xsave_features,
+            memory_regions: Vec::new(),
+            dirty_bitmap_tmp: vec![0u64; (4*1024*1024*1024) / (4096 * 64)],
         };
 
         // Register that we only want one processor
@@ -834,10 +844,67 @@ impl Whvp {
         assert!(backing.len() > 0, "Cannot map zero bytes");
 
         // Map the memory in!
+        // Always mark mapped memory as tracked for dirty changes
         let res = unsafe { WHvMapGpaRange(self.partition,
             backing.as_mut_ptr() as *mut c_void, addr as u64,
-            backing.len() as u64, perm) };
+            backing.len() as u64, perm | PERM_DIRTY) };
         assert!(res == 0, "WHvMapGpaRange() error: {:#x}", res);
+
+        // Save that we mapped this memory region
+        self.memory_regions.push((addr, backing.len()));
+    }
+
+    // benchmarking
+    // xperf -on base -stackwalk profile
+    // <run benchmark>
+    // xperf -d trace.etl
+    pub fn get_dirty_list(&mut self, dirty_bits_l1: &mut [u64],
+            dirty_bits_l2: &mut [u64]) {
+        unsafe {
+            let bitmap = &mut self.dirty_bitmap_tmp;
+
+            assert!(self._whvp_features.__bindgen_anon_1.DirtyPageTracking() != 0,
+                "Dirty page tracking not supported in your version of Windows.\
+                 You need a modern Windows build (17763 or newer)\
+                 Check your version with the `winver` command. To get on this\
+                 build as of Jan 2019 you need to be on the SAC (Targeted)\
+                 branch. You could also use an insider build (fast or slow)");
+
+            // For each memory region get the dirty bitmap
+            for &(paddr, size) in self.memory_regions.iter() {
+                // This is paranoid, we should never have non-aligned entries
+                // here in the first place.
+                assert!(paddr & 0xfff == 0 && size & 0xfff == 0);
+
+                let res = WHvQueryGpaRangeDirtyBitmap(self.partition,
+                    paddr as u64, size as u64, bitmap.as_mut_ptr(),
+                    std::mem::size_of_val(bitmap.as_slice()) as u32);
+                assert!(res == 0,
+                    "WHvQueryGpaRangeDirtyBitmap() error: {:#x}", res);
+
+                let qwords_in_map = size / (4096 * 64);
+                for (ii, qword) in bitmap[..qwords_in_map]
+                        .iter_mut().enumerate() {
+                    // Nothing dirty here
+                    if *qword == 0 { continue; }
+
+                    // Compute address of this qword
+                    let addr = paddr + ii * 4096 * 64;
+
+                    // Set the dirty bit in the first level (1 MiB) dirty bit
+                    // table
+                    let qword_l1 = addr / (1024 * 1024 * 64);
+                    let bit_l1   = (addr / (1024 * 1024)) % 64;
+                    dirty_bits_l1[qword_l1] |= 1 << bit_l1;
+
+                    // Set the dirty bits in the 4 KiB list. This has the same
+                    // layout as the dirty map we get from
+                    // WHvQueryGpaRangeDirtyBitmap so we can just or the bits in
+                    let qword_l2 = addr / (4096 * 64);
+                    dirty_bits_l2[qword_l2] |= *qword;
+                }
+            }
+        }
     }
 
     // Run the hypervisor until exit, returning the exit context

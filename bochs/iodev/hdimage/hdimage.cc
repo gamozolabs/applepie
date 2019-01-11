@@ -1386,7 +1386,12 @@ vdisk_get_size_t vdisk_get_size = NULL;
 dll_image_t::dll_image_t()
 {
   if (hlib_vdisk == NULL) {
+#ifdef BOCHSERVISOR
+    // Use the bochservisor dll rather than vdisk.dll
+    hlib_vdisk = LoadLibrary("..\\bochservisor\\target\\release\\bochservisor.dll");
+#else
     hlib_vdisk = LoadLibrary("vdisk.dll");
+#endif
     if (hlib_vdisk != NULL) {
       vdisk_open =  (vdisk_open_t)        GetProcAddress(hlib_vdisk,"vdisk_open");
       vdisk_read =  (vdisk_read_t)        GetProcAddress(hlib_vdisk,"vdisk_read");
