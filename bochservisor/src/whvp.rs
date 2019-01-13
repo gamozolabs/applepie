@@ -762,7 +762,7 @@ impl Whvp {
         // Enable vmexits on certain events
         let mut vmexits: WHV_EXTENDED_VM_EXITS = unsafe { std::mem::zeroed() };
         unsafe {
-            vmexits.__bindgen_anon_1.set_ExceptionExit(0);
+            vmexits.__bindgen_anon_1.set_ExceptionExit(1);
             vmexits.__bindgen_anon_1.set_X64MsrExit(1);
             vmexits.__bindgen_anon_1.set_X64CpuidExit(1);
         }
@@ -770,6 +770,15 @@ impl Whvp {
             WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExtendedVmExits,
             &vmexits as *const WHV_EXTENDED_VM_EXITS as *const c_void,
             std::mem::size_of_val(&vmexits) as u32)
+        };
+        assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
+
+        // Set the vmexit bitmap
+        let vmexit_bitmap: u64 = 1 << 1;
+        let res = unsafe { WHvSetPartitionProperty(partition,
+            WHV_PARTITION_PROPERTY_CODE_WHvPartitionPropertyCodeExceptionExitBitmap,
+            &vmexit_bitmap as *const u64 as *const c_void,
+            std::mem::size_of_val(&vmexit_bitmap) as u32)
         };
         assert!(res == 0, "WHvSetPartitionProperty() error: {:#x}", res);
 
@@ -995,7 +1004,80 @@ impl Whvp {
         }
     }
 
-    // Clear a pending exception
+    pub fn test_exception(&mut self) {
+        // List of names
+        const REGINT_NAMES: &[i32] = &[
+            WHV_REGISTER_NAME_WHvRegisterPendingEvent
+        ];
+
+        let mut event: WHV_X64_PENDING_EXCEPTION_EVENT =
+            unsafe { std::mem::zeroed() };
+
+        let res = unsafe { WHvGetVirtualProcessorRegisters(self.partition, 0,
+            REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
+            &mut event as *mut WHV_X64_PENDING_EXCEPTION_EVENT as *mut WHV_REGISTER_VALUE) };
+        assert!(res == 0,
+            "WHvGetVirtualProcessorRegisters() error: {:#x}",
+            res);
+
+        unsafe {
+            print!("EventPending {} EventType {} DeliverErrorCode {} Vector {} ErrorCode {:x} Parameter {:x}\n",
+                event.__bindgen_anon_1.EventPending(),
+                event.__bindgen_anon_1.EventType(),
+                event.__bindgen_anon_1.DeliverErrorCode(),
+                event.__bindgen_anon_1.Vector(),
+                event.__bindgen_anon_1.ErrorCode,
+                event.__bindgen_anon_1.ExceptionParameter);
+        }
+
+    }
+
+    /// Request that an exception is delivered to the guest based on `vector`
+    /// and `error_code`. If `error_code` is `None` then no error code will
+    /// be pushed onto the stack for the exception
+    pub fn deliver_exception(&mut self, vector: u8, error_code: Option<u32>) {
+        // List of names
+        const REGINT_NAMES: &[i32] = &[
+            WHV_REGISTER_NAME_WHvRegisterPendingEvent
+        ];
+
+        let mut event: WHV_X64_PENDING_EXCEPTION_EVENT =
+            unsafe { std::mem::zeroed() };
+
+        // Get current exception event state
+        let res = unsafe { WHvGetVirtualProcessorRegisters(self.partition, 0,
+            REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
+            &mut event as *mut WHV_X64_PENDING_EXCEPTION_EVENT as
+            *mut WHV_REGISTER_VALUE) };
+        assert!(res == 0,
+            "WHvGetVirtualProcessorRegisters() error: {:#x}",
+            res);
+
+        unsafe {
+            // Make sure there's not already a pending exception event
+            assert!(event.__bindgen_anon_1.EventPending() == 0,
+                "Can't deliver exception when one is already pending");
+
+            event.__bindgen_anon_1.set_EventPending(1);
+            event.__bindgen_anon_1.set_EventType(
+                WHV_X64_PENDING_EVENT_TYPE_WHvX64PendingEventException as u32);
+            event.__bindgen_anon_1.set_DeliverErrorCode(
+                if error_code.is_none() { 0 } else { 1 });
+            event.__bindgen_anon_1.set_Vector(vector as u32);
+            event.__bindgen_anon_1.ErrorCode = error_code.unwrap_or(0);
+            event.__bindgen_anon_1.ExceptionParameter = 0; // What is this?
+
+            let res = WHvSetVirtualProcessorRegisters(self.partition,
+                0, REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
+                &event as *const WHV_X64_PENDING_EXCEPTION_EVENT as
+                *const WHV_REGISTER_VALUE);
+            assert!(res == 0,
+                "WHvSetVirtualProcessorRegisters() error: {:#x}",
+                res);
+        }
+    }
+
+    /// Clear a pending exception
     pub fn clear_pending_exception(&mut self) {
         // List of names
         const REGINT_NAMES: &[i32] = &[

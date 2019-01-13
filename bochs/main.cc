@@ -410,7 +410,14 @@ struct _bochs_routines {
   void  (*write_msr)(Bit32u index, Bit64u value);
   void  (*after_restore)(void);
   void  (*reset_all)(void);
+  void  (*take_snapshot)(const char *folder_name);
 };
+
+// Take a Bochs snapshot, save it to `folder_name` and then exit Bochs cleanly
+void take_snapshot(const char *folder_name) {
+  SIM->save_state(folder_name);
+  exit(-1337);
+}
 
 // Write an MSR into Bochs state
 void write_msr(Bit32u index, Bit64u value) {
@@ -941,6 +948,7 @@ void initialize_bochservisor()
   routines.write_msr          = write_msr;
   routines.after_restore      = bochservisor_after_restore;
   routines.reset_all          = bochservisor_reset;
+  routines.take_snapshot      = take_snapshot;
 
   // Lookup the address of the Rust CPU look implementation in the DLL
   bochs_cpu_loop = (void (*)(struct _bochs_routines*, Bit64u, void*, void*, void*, void*))

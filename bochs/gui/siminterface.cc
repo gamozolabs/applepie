@@ -1351,6 +1351,7 @@ bx_bool bx_real_sim_c::restore_hardware()
     // state
     if(!strcmp(sr_list->get(dev)->get_name(), "memory")) {
       printf("Bypassing restore of memory in Bochs, using custom restore\n");
+      //continue;
     }
 #endif
 

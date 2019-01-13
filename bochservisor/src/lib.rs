@@ -20,6 +20,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::win32::{ModuleList};
 use std::fs::File;
 use std::io::Write;
+use std::time::SystemTime;
+use std::ffi::CString;
 
 /// Number of instructions to step in emulation mode after a vmexit
 const EMULATE_STEPS: u64 = 250;
@@ -81,6 +83,9 @@ pub struct BochsRoutines {
 
     /// Reset all devices and CPUs in Bochs
     reset_all: extern fn(),
+
+    /// Take a Bochs snapshot and save it to `folder_name`
+    take_snapshot: extern fn(folder_name: *const i8) -> !,
 }
 
 /// Named structure for tracking memory regions in Bochs
@@ -807,8 +812,7 @@ fn restore(orig_memory: &[u8], memory: &mut [u8],
             dirty_bits_l1, dirty_bits_l2);
 
         // Restore memory
-        reset_dirty_pages(orig_memory, memory,
-            dirty_bits_l1, dirty_bits_l2);
+        reset_dirty_pages(orig_memory, memory, dirty_bits_l1, dirty_bits_l2);
 
         // Restore disk
         disk::vdisk_discard_changes();
@@ -1323,6 +1327,98 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64,
                     persist.emulating += EMULATE_STEPS;
                     continue;
                 }
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException => {
+                    //const MAGIC_BREAKPOINT_VALUE: u64 = 0x1ab17b3c3638;
+                    const MAGIC_BREAKPOINT_VALUE: u64 = 0x133713371337;
+
+                    let exception =
+                        unsafe { &vmexit.__bindgen_anon_1.VpException };
+
+                    if exception.ExceptionType == 1 {
+                        // a #DB debug exception occured
+                        let dr0 = unsafe { context.dr0.Reg64 };
+                        let dr1 = unsafe { context.dr1.Reg64 };
+                        let dr2 = unsafe { context.dr2.Reg64 };
+                        let dr3 = unsafe { context.dr3.Reg64 };
+                        let dr6 = unsafe { context.dr6.Reg64 };
+                        let dr7 = unsafe { context.dr7.Reg64 };
+
+                        // Combine local and global breakpoints into a 4-bit
+                        // vector of enabled breakpoint state
+                        let enabled_breakpoints =
+                            if (dr7 & (3 << 0)) != 0 { 1 << 0 } else { 0 } |
+                            if (dr7 & (3 << 2)) != 0 { 1 << 1 } else { 0 } |
+                            if (dr7 & (3 << 4)) != 0 { 1 << 2 } else { 0 } |
+                            if (dr7 & (3 << 6)) != 0 { 1 << 3 } else { 0 };
+
+                        // Figure out which hardware breakpoints triggered.
+                        // This could be none as this #DB could have been from
+                        // a single step event
+                        let caused_breakpoint =
+                            (dr6 & 0xf) & enabled_breakpoints;
+
+                        // Clear that the debug exception occured
+                        // You're supposed to set DR6.RTM when clearing DR6
+                        context.dr6.Reg64 = 1 << 16;
+
+                        if caused_breakpoint != 0 && (
+                                dr0 == MAGIC_BREAKPOINT_VALUE ||
+                                dr1 == MAGIC_BREAKPOINT_VALUE ||
+                                dr2 == MAGIC_BREAKPOINT_VALUE ||
+                                dr3 == MAGIC_BREAKPOINT_VALUE) {
+                            let uptime_since_epoch =
+                                SystemTime::now().duration_since(
+                                    SystemTime::UNIX_EPOCH).unwrap();
+
+                            // Construct a filename for the folder
+                            let snapshot_folder_name =
+                                format!("snapshot_{:?}", uptime_since_epoch);
+
+                            print!("Taking snapshot to: {}\n",
+                                snapshot_folder_name);
+
+                            // Make snapshot folder
+                            std::fs::create_dir(&snapshot_folder_name)
+                                .expect("Snapshot already exists");
+
+                            // Cause a Bochs snapshot!
+                            let folder_name_cstr =
+                                CString::new(snapshot_folder_name)
+                                .expect("Couldn't convert to cstring");
+                            (routines.take_snapshot)(folder_name_cstr.as_ptr());
+                        } else {
+                            // We should handle re-injecting the #DB exception
+                            continue;
+                        }
+
+                        /*
+                        print!("Debug exception happened\n");
+
+                        // Inject the exception that was supposed to happen
+                        unsafe {
+                            if exception.ExceptionInfo
+                                    .__bindgen_anon_1.ErrorCodeValid() != 0 {
+                                persist.hypervisor.as_mut().unwrap()
+                                    .deliver_exception(exception.ExceptionType,
+                                        Some(exception.ErrorCode));
+                            } else {
+                                persist.hypervisor.as_mut().unwrap()
+                                    .deliver_exception(
+                                        exception.ExceptionType, None);
+                            }
+
+                            print!("{}\n", context);
+                        }
+
+                        persist.hypervisor.as_mut().unwrap().test_exception();
+
+                        assert!(persist.emulating == 0,
+                            "Shouldn't be emulating during exception");
+                        continue;*/
+                    } else {
+                        panic!("Unhandled exception vmexit");
+                    }
+                }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64IoPortAccess => {
                     // Emulate I/O by emulating using Bochs for a bit
                     // Note this is tunable but 100 seems to by far be the best
@@ -1402,6 +1498,10 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64,
                     // We got an interrupt window! Well we don't have to do
                     // anything as now Bochs knows it can deliver async events
                     // and will when we `step_device()`
+                }
+                WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonUnrecoverableException => {
+                    persist.emulating += EMULATE_STEPS;
+                    continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonX64MsrAccess => {
                     // Handle MSR read/writes
