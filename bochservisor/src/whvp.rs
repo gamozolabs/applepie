@@ -1004,34 +1004,6 @@ impl Whvp {
         }
     }
 
-    pub fn test_exception(&mut self) {
-        // List of names
-        const REGINT_NAMES: &[i32] = &[
-            WHV_REGISTER_NAME_WHvRegisterPendingEvent
-        ];
-
-        let mut event: WHV_X64_PENDING_EXCEPTION_EVENT =
-            unsafe { std::mem::zeroed() };
-
-        let res = unsafe { WHvGetVirtualProcessorRegisters(self.partition, 0,
-            REGINT_NAMES.as_ptr(), REGINT_NAMES.len() as u32,
-            &mut event as *mut WHV_X64_PENDING_EXCEPTION_EVENT as *mut WHV_REGISTER_VALUE) };
-        assert!(res == 0,
-            "WHvGetVirtualProcessorRegisters() error: {:#x}",
-            res);
-
-        unsafe {
-            print!("EventPending {} EventType {} DeliverErrorCode {} Vector {} ErrorCode {:x} Parameter {:x}\n",
-                event.__bindgen_anon_1.EventPending(),
-                event.__bindgen_anon_1.EventType(),
-                event.__bindgen_anon_1.DeliverErrorCode(),
-                event.__bindgen_anon_1.Vector(),
-                event.__bindgen_anon_1.ErrorCode,
-                event.__bindgen_anon_1.ExceptionParameter);
-        }
-
-    }
-
     /// Request that an exception is delivered to the guest based on `vector`
     /// and `error_code`. If `error_code` is `None` then no error code will
     /// be pushed onto the stack for the exception

@@ -174,13 +174,14 @@ void bx_instr_vmexit(unsigned cpu, Bit32u reason, Bit64u qualification);
 
 /* execution */
 #define BX_INSTR_BEFORE_EXECUTION(cpu_id, i) \
-    extern void (*report_coverage)(Bit64u, int, Bit64u, Bit16u, Bit64u);\
+    extern void (*report_coverage)(Bit64u, int, Bit64u, Bit16u, Bit64u, Bit64u);\
     (*report_coverage)(\
         BX_CPU_THIS_PTR cr3 & 0xFFFFFFFFFF000ULL,\
         (BX_CPU_THIS_PTR efer.get32() & (1 << 10)) != 0,\
         BX_CPU_THIS_PTR sregs[BX_SEG_REG_GS].cache.u.segment.base,\
         BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS].selector.value,\
-        BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS].cache.u.segment.base + RIP)
+        BX_CPU_THIS_PTR sregs[BX_SEG_REG_CS].cache.u.segment.base + RIP, \
+        RSP)
 
 #define BX_INSTR_AFTER_EXECUTION(cpu_id, i)
 #define BX_INSTR_REPEAT_ITERATION(cpu_id, i)

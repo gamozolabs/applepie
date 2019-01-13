@@ -880,7 +880,7 @@ struct _bochs_routines routines = { 0 };
 void (*bochs_cpu_loop)(struct _bochs_routines*, Bit64u, void*, void*, void*, void*) = NULL;
 
 // Cached address of the Rust code coverage callback
-void (*report_coverage)(Bit64u, int, Bit64u, Bit16u, Bit64u) = NULL;
+void (*report_coverage)(Bit64u, int, Bit64u, Bit16u, Bit64u, Bit64u) = NULL;
 
 // Cached address of the Rust device state registration callback
 // Type is an enum from `enum _shadow_type` in paramtree.cc
@@ -959,7 +959,7 @@ void initialize_bochservisor()
   }
 
   // Lookup the address of the Rust coverage reporting routine
-  report_coverage = (void (*)(Bit64u, int, Bit64u, Bit16u, Bit64u))
+  report_coverage = (void (*)(Bit64u, int, Bit64u, Bit16u, Bit64u, Bit64u))
     GetProcAddress(module, "report_coverage");
   if(!report_coverage) {
     fprintf(stderr, "GetProcAddress() error : %d\n", GetLastError());

@@ -204,6 +204,9 @@ struct Statistics {
 
     /// Number of module list walks
     module_list_walks: u64,
+
+    /// Number of fuzz cases
+    num_fuzz_cases: u64,
 }
 
 /// A single module worth of coverage information
@@ -368,6 +371,62 @@ impl MemReader {
         bread
     }
 
+    /// Write physical memory at `paddr` from an input buffer. Returns number
+    /// of bytes written, this may be smaller than `input.len()` on partial
+    /// writes
+    pub fn write_phys(&mut self, paddr: usize, input: &[u8]) -> usize {
+        // Sanity check
+        assert!(input.len() > 0, "Input buffer was zero size");
+
+        // Track number of bytes read
+        let mut bread = 0usize;
+
+        while bread < input.len() {
+            let mut matched_something = false;
+            
+            for mr in &self.regions {
+                // Check if this address falls in this region
+                if paddr >= mr.paddr {
+                    // Compute offset and remainder of region
+                    let offset = paddr - mr.paddr;
+                    let remain = mr.size.saturating_sub(offset);
+
+                    // Nothing in this region for us
+                    if remain <= 0 { continue; }
+
+                    // Convert to Rust slice
+                    let region = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            mr.backing as *mut u8, mr.size)
+                    };
+
+                    // Compute bytes to copy
+                    let remain = std::cmp::min(input.len() - bread, remain);
+
+                    // Copy bytes
+                    region[offset..offset+remain].copy_from_slice(
+                        &input[bread..bread+remain]);
+
+                    // Update read amount
+                    bread += remain;
+                    matched_something = true;
+
+                    if bread >= input.len() {
+                        assert!(bread == input.len(), "Whoa we overshot");
+                        return bread;
+                    }
+                }
+            }
+
+            // Failed to find a region that contains this byte, bail out
+            if !matched_something { break; }
+        }
+
+        assert!(bread < input.len(), "Success path shouldn't go here");
+
+        bread
+    }
+
     /// Read virtual memory at `vaddr` using page table `cr3` into `buf`.
     /// Returns number of bytes read (can be less than `buf.len()` on error)
     pub fn read_virt(&mut self, cr3: usize, vaddr: usize,
@@ -394,6 +453,44 @@ impl MemReader {
             // Read one byte from memory
             if self.read_phys(guest_phys as usize,
                     &mut buf[offset..offset+1]) != 1 {
+                // Failed to read, return bytes read to this point
+                return offset;
+            }
+
+            // Update physical pointer
+            guest_phys += 1;
+        }
+
+        // Return bytes read
+        buf.len()
+    }
+
+    /// Writes virtual memory at `vaddr` using page table `cr3` from `buf`.
+    /// Returns number of bytes written (can be less than `buf.len()` on error)
+    pub fn write_virt(&mut self, cr3: usize, vaddr: usize,
+                      buf: &[u8]) -> usize
+    {
+        // Cached physical translation
+        let mut guest_phys = 0;
+
+        // Go through each byte
+        for offset in 0..buf.len() {
+            // Update translation on new pages
+            if (guest_phys & 0xfff) == 0 {
+                // Translate vaddr to paddr
+                let mut guest_pt = unsafe {
+                    virtmem::PageTable::from_existing(cr3 as *mut u64, self)
+                };
+                guest_phys = match guest_pt.virt_to_phys_dirty(
+                        (vaddr + offset) as u64, false) {
+                    Ok(Some((phys, _))) => phys,
+                    _                   => return offset,
+                };
+            }
+
+            // Read one byte from memory
+            if self.write_phys(guest_phys as usize,
+                    &buf[offset..offset+1]) != 1 {
                 // Failed to read, return bytes read to this point
                 return offset;
             }
@@ -587,7 +684,7 @@ pub extern "C" fn register_state(name: *const u8, label: *const u8,
 #[no_mangle]
 /// Callback for handling coverage events
 pub extern "C" fn report_coverage(cr3: usize, lma: bool, gs_base: usize,
-        cs: u16, rip: usize) -> bool {
+        cs: u16, rip: usize, _rsp: usize) -> bool {
     if COVERAGE_DISABLE { return false; }
 
     // Fast path, we only collect 64-bit coverage right now
@@ -1223,8 +1320,16 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64,
 
                 // Attempt to find the nt!PsLoadedModuleList
                 if persist.kernel_module_list.is_none() {
+                    // Get information about the guest state
+                    let cr3 = context.cr3() as usize;
+                    let lma =
+                        (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
+                    let kernel_gs = unsafe { context.gs.Segment.Base as usize };
+                    let cs        = unsafe { context.cs.Segment.Selector };
+
                     persist.kernel_module_list =
-                        find_kernel_modlist(&context, &mut persist.memory).ok();
+                        find_kernel_modlist(cr3, lma, kernel_gs, cs,
+                        &mut persist.memory).ok();
                 }
 
                 // Update the next report time
@@ -1286,8 +1391,9 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64,
                 let gs_base = unsafe { context.gs.Segment.Base } as usize;
                 let cs = unsafe { context.cs.Segment.Selector };
                 let rip = context.rip() as usize;
+                let rsp = unsafe { context.rsp.Reg64 as usize };
 
-                report_coverage(cr3, lma, gs_base, cs, rip);
+                report_coverage(cr3, lma, gs_base, cs, rip, rsp);
                 persist = x.borrow_mut();
             }
 
@@ -1328,8 +1434,18 @@ pub extern "C" fn bochs_cpu_loop(routines: &BochsRoutines, pmem_size: u64,
                     continue;
                 }
                 WHV_RUN_VP_EXIT_REASON_WHvRunVpExitReasonException => {
-                    //const MAGIC_BREAKPOINT_VALUE: u64 = 0x1ab17b3c3638;
-                    const MAGIC_BREAKPOINT_VALUE: u64 = 0x133713371337;
+                    // Only take snapshots when running live
+                    if orig_memory.is_some() {
+                        persist.hypervisor.as_mut().unwrap().clear_pending_exception();
+                        context.dr6.Reg64 = 1 << 16;
+                        unsafe { context.rflags.Reg64 |= 1 << 16; }
+                        (routines.set_context)(&context);
+
+                        //persist.hypervisor.as_mut().unwrap().deliver_exception(1, None);
+                        continue;
+                    }
+
+                    const MAGIC_BREAKPOINT_VALUE: u64 = 0x7b3c3638;
 
                     let exception =
                         unsafe { &vmexit.__bindgen_anon_1.VpException };

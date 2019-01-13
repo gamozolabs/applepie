@@ -1,5 +1,4 @@
 use crate::MemReader;
-use crate::whvp::WhvpContext;
 use std::fmt::Write;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -234,14 +233,8 @@ fn get_modlist_user<'a>(modlist: &mut ModuleList,
 }
 
 // Find the address of the `nt!PsLoadedModuleList` global
-pub fn find_kernel_modlist(context: &WhvpContext,
+pub fn find_kernel_modlist(cr3: usize, lma: bool, kernel_gs: usize, cs: u16,
         memory: &mut MemReader) -> Result<usize, ()> {
-    // Get information about the guest state
-    let cr3       = context.cr3() as usize;
-    let lma       = (unsafe { context.efer.Reg64 } & (1 << 10)) != 0;
-    let kernel_gs = unsafe { context.gs.Segment.Base as usize };
-    let cs        = unsafe { context.cs.Segment.Selector };
-
     // Make sure we have a GS, and we're also 64-bit and in kernel mode
     if !(lma && (cs & 3) == 0 && (kernel_gs & (1 << 63)) != 0) {
         return Err(());
