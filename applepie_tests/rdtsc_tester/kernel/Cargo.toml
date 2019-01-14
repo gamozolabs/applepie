@@ -1,0 +1,14 @@
+[package]
+name = "kernel"
+version = "0.1.0"
+authors = ["bfalk"]
+
+[dependencies]
+
+[profile.release]
+panic = "abort"
+debug = true
+
+[profile.dev]
+panic = "abort"
+

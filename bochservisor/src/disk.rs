@@ -38,7 +38,11 @@ struct VirtualDisk {
 pub fn vdisk_discard_changes() {
     DISK_STATE.with(|x| {
         let mut x = x.borrow_mut();
-        let vdisk = x.as_mut().expect("No vdisk mounted");
+        
+        // Handle cases where no vdisk is used
+        if x.is_none() { return; }
+
+        let vdisk = x.as_mut().unwrap();
 
         // Drop all entries in the `HashMap`
         vdisk.volatile_store.as_mut()
@@ -51,7 +55,11 @@ pub fn vdisk_discard_changes() {
 pub fn vdisk_set_non_volatile() {
     DISK_STATE.with(|x| {
         let mut x = x.borrow_mut();
-        let vdisk = x.as_mut().expect("No vdisk mounted");
+
+        // Handle cases where no vdisk is used
+        if x.is_none() { return; }
+
+        let vdisk = x.as_mut().unwrap();
 
         // If the disk is already non-volatile, just return out
         if vdisk.volatile_store.is_none() {
