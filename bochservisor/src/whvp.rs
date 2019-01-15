@@ -723,6 +723,9 @@ impl Whvp {
         // Create a new WHVP partition
         let mut partition: WHV_PARTITION_HANDLE = std::ptr::null_mut();
         let res = unsafe { WHvCreatePartition(&mut partition) };
+        if res == 0x80070005u32 as i32 {
+            panic!("Windows Hypervisor Platform now requires Admin access, please rerun this application as Administrator!")
+        }
         assert!(res == 0, "WHvCreatePartition() error: {:#x}", res);
 
         // Create the partition object now which will make a destructor if we
