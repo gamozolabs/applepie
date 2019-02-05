@@ -57,7 +57,7 @@ BX_MEM_C::BX_MEM_C()
 Bit8u* BX_MEM_C::alloc_vector_aligned(Bit64u bytes, Bit64u alignment)
 {
   Bit64u test_mask = alignment - 1;
-  BX_MEM_THIS actual_vector = new Bit8u [(Bit32u)(bytes + test_mask)];
+  BX_MEM_THIS actual_vector = new Bit8u [bytes + test_mask];
   if (BX_MEM_THIS actual_vector == 0) {
     BX_PANIC(("alloc_vector_aligned: unable to allocate host RAM !"));
     return 0;
